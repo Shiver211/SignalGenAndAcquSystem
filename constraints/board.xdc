@@ -20,6 +20,16 @@ set_property IOSTANDARD LVCMOS33 [get_ports uart_txd]
 set_property DRIVE 8 [get_ports uart_txd]
 set_property SLEW SLOW [get_ports uart_txd]
 
+# DAC8830：四个信号均位于 Bank16，J10 已确认选择 3.3V。
+set_property PACKAGE_PIN E14 [get_ports dac_sclk]
+set_property PACKAGE_PIN E17 [get_ports dac_mosi]
+set_property PACKAGE_PIN F14 [get_ports dac_cs1_n]
+set_property PACKAGE_PIN B13 [get_ports dac_cs2_n]
+set_property IOSTANDARD LVCMOS33 [get_ports {dac_sclk dac_mosi dac_cs1_n dac_cs2_n}]
+set_property DRIVE 8 [get_ports {dac_sclk dac_mosi dac_cs1_n dac_cs2_n}]
+set_property SLEW FAST [get_ports {dac_sclk dac_mosi}]
+set_property SLEW SLOW [get_ports {dac_cs1_n dac_cs2_n}]
+
 # UART 和外部复位均为异步接口；同步器之后的内部路径仍由系统时钟约束。
 set_false_path -from [get_ports {sys_rst_n uart_rxd}]
 set_false_path -to [get_ports uart_txd]

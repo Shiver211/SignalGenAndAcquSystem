@@ -6,9 +6,12 @@ Signal.gen/
 Signal.hw/hw_1/
 Signal.ip_user_files/
 Signal.runs/
+Signal.sim/
 Signal.srcs/utils_1/
 mcp_sim/
 .Xil/
+dfx_runtime.txt
+scripts/
 
 # Vivado IP：只版本化可重建配置，忽略输出产品和网表。
 ip/*/*/*

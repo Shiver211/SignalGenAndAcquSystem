@@ -1,3 +1,18 @@
 references
 .claude
 tmp
+Signal.cache/
+Signal.gen/
+Signal.hw/hw_1/
+Signal.ip_user_files/
+Signal.runs/
+Signal.srcs/utils_1/
+mcp_sim/
+.Xil/
+
+# Vivado IP：只版本化可重建配置，忽略输出产品和网表。
+ip/*/*/*
+!ip/*/*/*.xci
+!ip/*/*/*.coe
+!ip/*/*/*.mem
+!ip/*/*/*.mif

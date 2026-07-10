@@ -84,7 +84,7 @@ RGMII 千兆以太网有效载荷约 100–115MB/s
 双通道 65Msps RAW32 数据率为 260MB/s
 ```
 
-因此千兆以太网仍不能持续上传双通道 65Msps RAW32 原始流。DDR3 用于吸收高速采集突发；连续显示采用板上处理后的低速数据。PHY 具体型号、RGMII 内部延迟模式和管理接口仍需从官方原理图确认。
+因此千兆以太网仍不能持续上传双通道 65Msps RAW32 原始流。DDR3 用于吸收高速采集突发；连续显示采用板上处理后的低速数据。官方原理图已确认 PHY 为 YT8531C，RGMII RX/TX 内部延迟绑带均使能，MDC/MDIO 引脚为 `T18/R18`。
 
 ---
 
@@ -167,7 +167,7 @@ CRC32(4)
 - **FR-NET-4** UDP 单包应用负载不超过 1400 字节，避免普通 1500 字节 MTU 下发生 IP 分片。
 - **FR-NET-5** `FRAME_ID + CHUNK_OFFSET` 用于乱序重组和丢包检测。
 - **FR-NET-6** `RAW_FRAME` 丢包时上位机通过 UART 请求指定块重发；`ENVELOPE_FRAME` 为实时数据，允许丢弃过期帧而不重传。
-- **FR-NET-7** RGMII 数据引脚和 125MHz RX 时钟按第 8.2 节配置；PHY 型号、内部延迟模式、I/O Standard 和管理方式须根据官方原理图确认后写入 XDC。
+- **FR-NET-7** RGMII 数据引脚和 125MHz RX 时钟按第 8.2 节配置；PHY 为 YT8531C，RGMII 电源为 3.3V，RX/TX 内部延迟绑带均使能，MDC/MDIO 管理接口由 FPGA 引脚 `T18/R18` 驱动。
 
 ### 3.4 上位机软件（Python / PyQt / PyMySQL）
 
@@ -287,7 +287,7 @@ Top.v
 - **NFR-1** FPGA 代码使用 Verilog，Vivado 工程 `Signal.xpr`，器件 xc7a35tfgg484-2L。
 - **NFR-2** Clocking Wizard、MIG、BMG、FIFO Generator 由 Vivado IP Catalog 生成；XPM FIFO/CDC 可直接例化。
 - **NFR-3** DDR3 器件为南亚 `NT5CC128M16JR-EK`，组织参数为 Bank 位宽 3、行位宽 14、列位宽 10、数据位宽 16；控制器使用 Xilinx MIG，物理引脚按第 8 节配置。
-- **NFR-4** 以太网数据接口已确认为 RGMII 形式，目标速率 1Gbps；仍须确认 PHY 型号、RGMII 延迟模式以及是否通过硬件绑带固定配置。
+- **NFR-4** 以太网数据接口为 YT8531C RGMII，目标速率 1Gbps；Bank14 和 PHY RGMII 电源均为 3.3V，PHY 地址为 `0x07`，RX/TX 内部延迟由硬件绑带使能。
 - **NFR-5** AD9226/DAC8830 通过扩展排针外接，XDC 按实际接线确定；参考例程中的 Altera 引脚不得套用。
 - **NFR-6** 上位机使用 Python 3、PyQt5、pyserial、PyMySQL、pyqtgraph、numpy；UDP 使用 Python 标准库 `socket`。
 - **NFR-7** 本机安装 MySQL 服务；大帧以 BLOB 存储，禁止逐样本逐行插入数据库。
@@ -335,8 +335,10 @@ Top.v
 | `eth_txd_1[1]` | output | `P14` |
 | `eth_txd_1[2]` | output | `U18` |
 | `eth_txd_1[3]` | output | `U17` |
+| `eth_mdc` | output | `T18` |
+| `eth_mdio` | inout | `R18` |
 
-`eth_rxc_1` 标注为 125MHz。工作簿中没有 MDC/MDIO 引脚，不能据此判断 PHY 是硬件绑带配置、管理接口位于其他连接器，还是表格遗漏。
+`eth_rxc_1` 标注为 125MHz。官方原理图确认 PHY 为 YT8531C：PHY 地址绑带为 `0x07`，`RXDLY` 和 `TXDLY` 均通过上拉使能，RGMII 电源选择外部 3.3V。工作簿遗漏了 MDC/MDIO，但原理图确认其 FPGA 引脚为 `T18/R18`。
 
 ### 8.3 DDR3
 

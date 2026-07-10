@@ -57,7 +57,7 @@
    - Ethernet PHY 型号、RGMII 内部延迟模式、硬件绑带和 MDC/MDIO 管理方式；
    - AD9226/DAC8830 实际使用的扩展连接器及接线。
 4. 建立 `rtl/`、`ip/`、`constraints/`、`sim/`、`host/` 目录。
-5. 用 Clocking Wizard 产生系统时钟、ADC 65MHz 时钟、ADC 可调相位读时钟和 SPI 控制时钟。
+5. 用 Clocking Wizard 产生系统时钟、ADC 65MHz 时钟和 ADC 可调相位读时钟；M1 的 SPI 控制逻辑保持在 100MHz 系统域，通过 clock-enable 和寄存器产生 SCLK，不新增独立时钟域。
 6. 各时钟域复位由 `mmcm_locked` 控制，并在本时钟域同步释放。
 7. 编写参数化 `uart_rx.v`、`uart_tx.v`，M0 使用 115200 baud。
 8. 顶层实现带 1 字节缓冲的 UART 回环。
@@ -253,7 +253,7 @@ dac_code    = 32768 + wave_signed × amplitude_vpk / 5V
 **任务**
 
 1. 按需求文档第 8.2 节连接已确认的 RGMII 引脚：RXC=`Y18`、TXC=`AA18`、PHY reset=`V18` 及 4bit RX/TX 数据总线。
-2. 从官方原理图确认 PHY 型号、RGMII-ID 延迟配置和管理方式；工作簿未列出 MDC/MDIO，不得自行假设引脚。
+2. 按官方原理图使用 YT8531C：PHY 地址 `0x07`，RGMII RX/TX 内部延迟绑带均使能，MDC/MDIO 使用 `T18/R18`。
 3. 以 1Gbps RGMII 为目标完成时钟、复位、输入/输出延迟和 XDC。
 4. 确认采用纯 RTL UDP；若改用 MicroBlaze + lwIP，先更新设计文档。
 5. 实现或集成 Ethernet MAC、ARP、IPv4、ICMP（可选）和 UDP。

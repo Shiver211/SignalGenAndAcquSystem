@@ -3,6 +3,9 @@
 module clock_reset_m0 (
     input  wire sys_clk,
     input  wire sys_rst_n,
+    input  wire phase_request_toggle,
+    input  wire phase_direction_inc,
+    input  wire [9:0] phase_step_count,
 
     output wire clk_sys_100m,
     output wire clk_adc_65m,
@@ -11,14 +14,25 @@ module clock_reset_m0 (
     output wire rst_adc,
     output wire rst_adc_read,
     output wire mmcm_locked,
+    output wire phase_busy,
+    output wire phase_done_toggle,
+    output wire signed [15:0] phase_position,
     output reg  [7:0] adc_heartbeat,
     output reg  [7:0] adc_read_heartbeat
 );
+
+    wire phase_psen;
+    wire phase_psincdec;
+    wire phase_psdone;
 
     clk_wiz_m0 u_clk_wiz_m0 (
         .clk_out1 (clk_sys_100m),
         .clk_out2 (clk_adc_65m),
         .clk_out3 (clk_adc_read_65m),
+        .psclk    (clk_sys_100m),
+        .psen     (phase_psen),
+        .psincdec (phase_psincdec),
+        .psdone   (phase_psdone),
         .resetn   (sys_rst_n),
         .locked   (mmcm_locked),
         .clk_in1  (sys_clk)
@@ -40,6 +54,24 @@ module clock_reset_m0 (
         .clk     (clk_adc_read_65m),
         .reset_n (mmcm_locked),
         .reset   (rst_adc_read)
+    );
+
+    // Fine-PS 模式从 0°启动。VCO=1300MHz 时每步约 13.736ps，
+    // 289 步对应约 3.970ns，复现 M0 的约 +4ns 初始读相位。
+    mmcm_phase_shift_ctrl #(
+        .INITIAL_STEPS (10'd289)
+    ) u_mmcm_phase_shift_ctrl (
+        .clk            (clk_sys_100m),
+        .reset          (rst_sys),
+        .request_toggle (phase_request_toggle),
+        .direction_inc  (phase_direction_inc),
+        .step_count     (phase_step_count),
+        .psdone         (phase_psdone),
+        .psen           (phase_psen),
+        .psincdec       (phase_psincdec),
+        .busy           (phase_busy),
+        .done_toggle    (phase_done_toggle),
+        .phase_position (phase_position)
     );
 
     // M0 诊断计数器确保两路 65MHz 时钟保留在最终网表中，后续可由 ILA 观察。

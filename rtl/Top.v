@@ -8,7 +8,13 @@ module Top (
     output wire dac_sclk,
     output wire dac_cs1_n,
     output wire dac_cs2_n,
-    output wire dac_mosi
+    output wire dac_mosi,
+    output wire adc_clk_a,
+    input  wire [11:0] adc_data_a,
+    input  wire adc_ora,
+    output wire adc_clk_b,
+    input  wire [11:0] adc_data_b,
+    input  wire adc_orb
 );
 
     wire clk_sys_100m;
@@ -52,9 +58,52 @@ module Top (
     wire debug_dac_cs2_n;
     wire debug_dac_mosi;
 
+    wire phase_request_toggle;
+    wire phase_direction_inc;
+    wire [9:0] phase_step_count;
+    (* MARK_DEBUG = "TRUE" *) wire phase_busy;
+    (* MARK_DEBUG = "TRUE" *) wire phase_done_toggle;
+    (* MARK_DEBUG = "TRUE" *) wire signed [15:0] phase_position;
+
+    wire [11:0] adc_raw_a;
+    wire [11:0] adc_raw_b;
+    wire [11:0] adc_code_a;
+    wire [11:0] adc_code_b;
+    wire adc_otr_a;
+    wire adc_otr_b;
+    wire adc_sample_valid;
+    wire [31:0] adc_sample_count;
+
+    wire [15:0] phase_position_bits;
+    wire [15:0] phase_position_adc;
+    reg  [15:0] phase_position_gray_sys;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [15:0] phase_gray_meta;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [15:0] phase_gray_sync;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg phase_busy_adc_meta;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg phase_busy_adc;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg phase_done_adc_meta;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg phase_done_adc;
+
+    function [15:0] gray_to_binary;
+        input [15:0] gray;
+        integer index;
+        begin
+            gray_to_binary[15] = gray[15];
+            for (index = 14; index >= 0; index = index - 1) begin
+                gray_to_binary[index] = gray_to_binary[index + 1] ^ gray[index];
+            end
+        end
+    endfunction
+
+    assign phase_position_bits = phase_position;
+    assign phase_position_adc  = gray_to_binary(phase_gray_sync);
+
     clock_reset_m0 u_clock_reset_m0 (
         .sys_clk          (sys_clk),
         .sys_rst_n        (sys_rst_n),
+        .phase_request_toggle(phase_request_toggle),
+        .phase_direction_inc(phase_direction_inc),
+        .phase_step_count (phase_step_count),
         .clk_sys_100m     (clk_sys_100m),
         .clk_adc_65m      (clk_adc_65m),
         .clk_adc_read_65m (clk_adc_read_65m),
@@ -62,8 +111,35 @@ module Top (
         .rst_adc          (rst_adc),
         .rst_adc_read     (rst_adc_read),
         .mmcm_locked      (mmcm_locked),
+        .phase_busy       (phase_busy),
+        .phase_done_toggle(phase_done_toggle),
+        .phase_position   (phase_position),
         .adc_heartbeat    (adc_heartbeat),
         .adc_read_heartbeat(adc_read_heartbeat)
+    );
+
+    ad9226_clock_forward u_ad9226_clock_forward (
+        .clk_adc_65m (clk_adc_65m),
+        .reset       (rst_adc),
+        .adc_clk_a   (adc_clk_a),
+        .adc_clk_b   (adc_clk_b)
+    );
+
+    ad9226_capture u_ad9226_capture (
+        .clk_adc_read_65m (clk_adc_read_65m),
+        .reset             (rst_adc_read),
+        .adc_data_a        (adc_data_a),
+        .adc_data_b        (adc_data_b),
+        .adc_otr_a         (adc_ora),
+        .adc_otr_b         (adc_orb),
+        .raw_a             (adc_raw_a),
+        .raw_b             (adc_raw_b),
+        .code_a            (adc_code_a),
+        .code_b            (adc_code_b),
+        .otr_a             (adc_otr_a),
+        .otr_b             (adc_otr_b),
+        .sample_valid      (adc_sample_valid),
+        .sample_count      (adc_sample_count)
     );
 
     uart_echo #(
@@ -89,6 +165,17 @@ module Top (
         .probe_out5 (ftw_ch2),
         .probe_out6 (amplitude_q15_ch2),
         .probe_out7 (dc_code_ch2)
+    );
+
+    // M2 相位扫描控制：每次切换 request_toggle 后移动 step_count 个细相移步进。
+    vio_m2 u_vio_m2 (
+        .clk        (clk_sys_100m),
+        .probe_in0  (phase_busy),
+        .probe_in1  (phase_done_toggle),
+        .probe_in2  (phase_position),
+        .probe_out0 (phase_request_toggle),
+        .probe_out1 (phase_direction_inc),
+        .probe_out2 (phase_step_count)
     );
 
     signal_gen_dual u_signal_gen_dual (
@@ -122,13 +209,36 @@ module Top (
         if (rst_sys) begin
             commit_count_ch1 <= 32'd0;
             commit_count_ch2 <= 32'd0;
+            phase_position_gray_sys <= 16'd0;
         end else begin
+            // 先寄存 Gray 码再跨域，避免二进制多位翻转产生组合毛刺。
+            phase_position_gray_sys <= phase_position_bits ^
+                                       (phase_position_bits >> 1);
             if (sample_commit_ch1) begin
                 commit_count_ch1 <= commit_count_ch1 + 1'b1;
             end
             if (sample_commit_ch2) begin
                 commit_count_ch2 <= commit_count_ch2 + 1'b1;
             end
+        end
+    end
+
+    // 相位位置用 Gray 码跨入 ADC 读时钟域；状态位使用两级同步器。
+    always @(posedge clk_adc_read_65m) begin
+        if (rst_adc_read) begin
+            phase_gray_meta     <= 16'd0;
+            phase_gray_sync     <= 16'd0;
+            phase_busy_adc_meta <= 1'b0;
+            phase_busy_adc      <= 1'b0;
+            phase_done_adc_meta <= 1'b0;
+            phase_done_adc      <= 1'b0;
+        end else begin
+            phase_gray_meta     <= phase_position_gray_sys;
+            phase_gray_sync     <= phase_gray_meta;
+            phase_busy_adc_meta <= phase_busy;
+            phase_busy_adc      <= phase_busy_adc_meta;
+            phase_done_adc_meta <= phase_done_toggle;
+            phase_done_adc      <= phase_done_adc_meta;
         end
     end
 
@@ -180,6 +290,19 @@ module Top (
         .probe5 (phase_ch2),
         .probe6 (commit_count_ch1),
         .probe7 (commit_count_ch2)
+    );
+
+    // M2：直接在 65MHz ADC 读时钟域观察两路原始码、转换码、OTR 和相位。
+    ila_m2 u_ila_m2 (
+        .clk    (clk_adc_read_65m),
+        .probe0 (adc_raw_a),
+        .probe1 (adc_code_a),
+        .probe2 (adc_raw_b),
+        .probe3 (adc_code_b),
+        .probe4 ({adc_otr_b, adc_otr_a}),
+        .probe5 (adc_sample_count[15:0]),
+        .probe6 (phase_position_adc),
+        .probe7 ({phase_busy_adc, phase_done_adc, adc_sample_valid})
     );
 
 endmodule

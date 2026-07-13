@@ -8,6 +8,8 @@ module dds_channel (
     input  wire [31:0] ftw,
     input  wire [15:0] amplitude_q15,
     input  wire [15:0] dc_code,
+    input  wire [15:0] gain_q15,
+    input  wire signed [15:0] offset_code,
     input  wire [15:0] sine_data,
 
     output wire [11:0] sine_addr,
@@ -32,13 +34,27 @@ module dds_channel (
     reg [15:0] dc_code_pipeline_1;
     reg [15:0] dc_code_pipeline_2;
     reg [15:0] dc_code_pipeline_3;
+    reg signed [16:0] calibration_centered_pipeline;
+    reg signed [16:0] calibration_gain_pipeline;
+    reg signed [16:0] calibration_centered_pipeline_2;
+    reg signed [16:0] calibration_gain_pipeline_2;
+    (* USE_DSP = "YES" *) reg signed [33:0] calibration_product_pipeline;
+    reg signed [33:0] calibration_product_output_pipeline;
+    reg signed [15:0] calibration_offset_pipeline_1;
+    reg signed [15:0] calibration_offset_pipeline_2;
+    reg signed [15:0] calibration_offset_pipeline_3;
+    reg signed [15:0] calibration_offset_pipeline_4;
 
     wire [15:0] amplitude_limited;
     wire signed [16:0] wave_signed;
     wire signed [16:0] amplitude_signed;
     wire signed [17:0] scaled_wave;
     wire signed [18:0] centered_output;
-    reg [15:0] dac_code_next;
+    wire signed [16:0] calibration_gain_signed;
+    wire signed [33:0] calibration_scaled;
+    wire signed [35:0] calibrated_output;
+    reg [15:0] base_code_next;
+    reg [15:0] calibrated_code_next;
 
     assign sine_addr     = phase_accumulator[31:20];
     assign phase_aligned = phase_pipeline;
@@ -50,6 +66,10 @@ module dds_channel (
     assign amplitude_signed  = $signed({1'b0, amplitude_limited});
     assign scaled_wave       = product_output_pipeline >>> 15;
     assign centered_output   = 19'sd32768 + scaled_wave;
+    assign calibration_gain_signed = $signed({1'b0, gain_q15});
+    assign calibration_scaled      = calibration_product_output_pipeline >>> 15;
+    assign calibrated_output       = 36'sd32768 + calibration_scaled +
+                                     calibration_offset_pipeline_4;
 
     always @(posedge clk) begin
         if (reset) begin
@@ -66,6 +86,18 @@ module dds_channel (
             dc_code_pipeline_1   <= 16'h8000;
             dc_code_pipeline_2   <= 16'h8000;
             dc_code_pipeline_3   <= 16'h8000;
+            calibration_centered_pipeline <= 17'sd0;
+            // DSP48 输入寄存器复位值必须为 0 才能被完整吸收；解除复位后
+            // 在 DAC 上电等待窗口内装入实际校准增益。
+            calibration_gain_pipeline     <= 17'sd0;
+            calibration_centered_pipeline_2 <= 17'sd0;
+            calibration_gain_pipeline_2     <= 17'sd0;
+            calibration_product_pipeline  <= 34'sd0;
+            calibration_product_output_pipeline <= 34'sd0;
+            calibration_offset_pipeline_1 <= 16'sd0;
+            calibration_offset_pipeline_2 <= 16'sd0;
+            calibration_offset_pipeline_3 <= 16'sd0;
+            calibration_offset_pipeline_4 <= 16'sd0;
         end else begin
             // 与同步 ROM 输出同时延迟一拍，三种波形共用同一相位基准。
             phase_pipeline <= phase_accumulator;
@@ -83,7 +115,20 @@ module dds_channel (
             dc_code_pipeline_2  <= dc_code_pipeline_1;
             dc_code_pipeline_3  <= dc_code_pipeline_2;
 
-            dac_code <= dac_code_next;
+            // 增益以 0x8000=1.0 的 Q1.15 表示；偏移量使用 DAC LSB。
+            calibration_centered_pipeline <=
+                $signed({1'b0, base_code_next}) - 17'sd32768;
+            calibration_gain_pipeline     <= calibration_gain_signed;
+            calibration_centered_pipeline_2 <= calibration_centered_pipeline;
+            calibration_gain_pipeline_2     <= calibration_gain_pipeline;
+            calibration_product_pipeline  <=
+                calibration_centered_pipeline_2 * calibration_gain_pipeline_2;
+            calibration_product_output_pipeline <= calibration_product_pipeline;
+            calibration_offset_pipeline_1 <= offset_code;
+            calibration_offset_pipeline_2 <= calibration_offset_pipeline_1;
+            calibration_offset_pipeline_3 <= calibration_offset_pipeline_2;
+            calibration_offset_pipeline_4 <= calibration_offset_pipeline_3;
+            dac_code                      <= calibrated_code_next;
 
             if (sample_commit && (ftw != 32'd0)) begin
                 phase_accumulator <= phase_accumulator + ftw;
@@ -117,13 +162,23 @@ module dds_channel (
 
     always @(*) begin
         if (zero_ftw_pipeline_3) begin
-            dac_code_next = dc_code_pipeline_3;
+            base_code_next = dc_code_pipeline_3;
         end else if (centered_output < 19'sd0) begin
-            dac_code_next = 16'h0000;
+            base_code_next = 16'h0000;
         end else if (centered_output > 19'sd65535) begin
-            dac_code_next = 16'hFFFF;
+            base_code_next = 16'hFFFF;
         end else begin
-            dac_code_next = centered_output[15:0];
+            base_code_next = centered_output[15:0];
+        end
+    end
+
+    always @(*) begin
+        if (calibrated_output < 36'sd0) begin
+            calibrated_code_next = 16'h0000;
+        end else if (calibrated_output > 36'sd65535) begin
+            calibrated_code_next = 16'hFFFF;
+        end else begin
+            calibrated_code_next = calibrated_output[15:0];
         end
     end
 

@@ -402,6 +402,7 @@ FPGA → PC：55 AA | CMD(1) | STATUS(1) | LEN(1) | PAYLOAD | CRC8(1)
 | `0x08` | 请求原始帧上传 | FRAME_ID |
 | `0x09` | 请求重传数据块 | FRAME_ID、OFFSET、LEN |
 | `0x0A` | 设置校准参数 | 通道、增益、零点 |
+| `0x0B` | 清除错误 | — |
 
 | STATUS | 含义 |
 |---|---|
@@ -412,6 +413,85 @@ FPGA → PC：55 AA | CMD(1) | STATUS(1) | LEN(1) | PAYLOAD | CRC8(1)
 | `0x04` | BUSY |
 | `0x05` | NO_FRAME |
 | `0x06` | INTERNAL_ERROR |
+
+#### B.1.1 M3 固化的 PAYLOAD 布局
+
+所有多字节字段均为小端序。`FLAGS.bit0=COMMIT`，其余位必须为 0。
+
+```text
+CMD 0x01，LEN=11，设置发生参数
+OFFSET  SIZE  FIELD
+0       1     CHANNEL：0=CH1，1=CH2
+1       1     WAVE：0=正弦，1=三角，2=方波
+2       4     FTW，允许 0x00000000..0x09374BC7
+6       2     AMPLITUDE_Q15，0x8000=5Vpk
+8       2     DC_CODE，FTW=0 时输出
+10      1     FLAGS
+
+CMD 0x02，LEN=13，设置采集参数
+0       1     TRIGGER_SOURCE：0=A，1=B
+1       2     THRESHOLD_CODE：0..4095
+3       2     HYSTERESIS_CODE：0..4095
+5       1     EDGE：0=上升沿，1=下降沿
+6       4     CAPTURE_DEPTH：1..67108864 个双通道样本组
+10      2     PRETRIGGER_PERMILLE：0..1000
+12      1     FLAGS
+
+CMD 0x03，LEN=14，设置处理参数
+0       1     DATA_MODE：0=RAW，1=ENVELOPE，2=DECIMATED
+1       4     DECIMATION：>=1
+5       4     DISPLAY_POINTS：>=1
+9       4     REFRESH_MILLIHZ：>=1
+13      1     FLAGS
+
+CMD 0x06，LEN=1，连续包络开关
+0       1     ENABLE：0=关闭，1=开启；该命令自动提交采集配置
+
+CMD 0x0A，LEN=6，设置 DAC 校准参数
+0       1     CHANNEL：0=CH1，1=CH2
+1       2     GAIN_Q15：0x8000=1.0，允许 0x4000..0xC000
+3       2     OFFSET_CODE：有符号 int16，单位为 DAC LSB
+5       1     FLAGS
+
+CMD 0x04 / 0x05 / 0x07 / 0x0B，LEN=0
+```
+
+发生参数和校准参数属于同一个提交组：可以先分别暂存两个通道，最后一条命令置 `COMMIT=1`，两个通道在同一个 100MHz 时钟边沿生效。采集参数和处理参数属于另一个提交组，提交时形成一个 167bit 快照，通过 XPM 握手一次性进入 65MHz ADC 域；FPGA 在目的域确认接收后才返回 ACK。
+
+M3 顶层 UART 波特率为 `921600`。上电默认两路 DAC 均为 `FTW=0、DC_CODE=0x8000、GAIN_Q15=0x8000、OFFSET_CODE=0`。
+
+#### B.1.2 CMD 0x07 状态应答
+
+状态应答 `LEN=32`：
+
+| OFFSET | SIZE | 字段 |
+|---:|---:|---|
+| 0 | 1 | 协议主版本，M3=`1` |
+| 1 | 1 | 协议次版本，M3=`0` |
+| 2..4 | 3 | 固件版本，M3=`0.3.0` |
+| 5 | 1 | 状态标志 |
+| 6 | 1 | 最近错误码 |
+| 7 | 1 | 保留 |
+| 8 | 4 | CRC 错误计数 |
+| 12 | 4 | UART 停止位错误计数 |
+| 16 | 4 | 命令错误计数 |
+| 20 | 4 | CH1 实测 DAC 更新率 Hz |
+| 24 | 4 | CH2 实测 DAC 更新率 Hz |
+| 28 | 2 | ADC 配置提交序号 |
+| 30 | 2 | ADC 域清错计数 |
+
+状态标志：
+
+```text
+bit0 CONTROL_BUSY
+bit1 ADC_ARMED
+bit2 ENVELOPE_ENABLED
+bit3 DDR_CALIBRATED
+bit4 NETWORK_LINK_UP
+bit5 ADC_CLOCK_ALIVE
+bit6 MMCM_LOCKED
+bit7 RESERVED
+```
 
 ### B.2 UDP 数据包
 

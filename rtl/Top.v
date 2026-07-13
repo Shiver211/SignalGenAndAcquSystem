@@ -24,8 +24,13 @@ module Top (
     (* MARK_DEBUG = "TRUE" *) wire rst_adc;
     (* MARK_DEBUG = "TRUE" *) wire rst_adc_read;
     (* MARK_DEBUG = "TRUE" *) wire mmcm_locked;
-    (* MARK_DEBUG = "TRUE" *) wire uart_overflow;
+    (* MARK_DEBUG = "TRUE" *) wire uart_protocol_error;
     (* MARK_DEBUG = "TRUE" *) wire uart_frame_error;
+    wire [7:0]  control_last_error;
+    wire [31:0] control_crc_error_count;
+    wire [31:0] control_uart_frame_error_count;
+    wire [31:0] control_command_error_count;
+    wire [15:0] control_config_sequence;
     wire [7:0] adc_heartbeat;
     wire [7:0] adc_read_heartbeat;
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg [7:0] adc_heartbeat_meta;
@@ -36,15 +41,22 @@ module Top (
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg rst_adc_sync;
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg rst_adc_read_meta;
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg rst_adc_read_sync;
+    reg [7:0]  adc_read_heartbeat_prev;
+    reg [16:0] adc_alive_timeout;
+    reg        adc_clock_alive;
 
     wire [1:0]  wave_sel_ch1;
     wire [31:0] ftw_ch1;
     wire [15:0] amplitude_q15_ch1;
     wire [15:0] dc_code_ch1;
+    wire [15:0] gain_q15_ch1;
+    wire signed [15:0] offset_code_ch1;
     wire [1:0]  wave_sel_ch2;
     wire [31:0] ftw_ch2;
     wire [15:0] amplitude_q15_ch2;
     wire [15:0] dc_code_ch2;
+    wire [15:0] gain_q15_ch2;
+    wire signed [15:0] offset_code_ch2;
     (* MARK_DEBUG = "TRUE" *) wire sample_commit_ch1;
     (* MARK_DEBUG = "TRUE" *) wire sample_commit_ch2;
     (* MARK_DEBUG = "TRUE" *) wire [15:0] dac_code_ch1;
@@ -53,6 +65,8 @@ module Top (
     (* MARK_DEBUG = "TRUE" *) wire [31:0] phase_ch2;
     (* MARK_DEBUG = "TRUE" *) reg  [31:0] commit_count_ch1;
     (* MARK_DEBUG = "TRUE" *) reg  [31:0] commit_count_ch2;
+    wire [31:0] dac_update_rate_ch1_hz;
+    wire [31:0] dac_update_rate_ch2_hz;
     wire debug_dac_sclk;
     wire debug_dac_cs1_n;
     wire debug_dac_cs2_n;
@@ -73,6 +87,11 @@ module Top (
     wire adc_otr_b;
     wire adc_sample_valid;
     wire [31:0] adc_sample_count;
+
+    (* KEEP = "TRUE" *) wire [166:0] adc_control_config;
+    (* KEEP = "TRUE" *) wire [15:0] adc_control_apply_count;
+    (* KEEP = "TRUE" *) wire [15:0] adc_control_clear_count;
+    (* MARK_DEBUG = "TRUE" *) wire adc_control_armed;
 
     wire [15:0] phase_position_bits;
     wire [15:0] phase_position_adc;
@@ -142,29 +161,46 @@ module Top (
         .sample_count      (adc_sample_count)
     );
 
-    uart_echo #(
+    // M3 控制面：UART 协议、原子寄存器提交以及 100MHz→65MHz CDC。
+    control_plane #(
         .CLK_FREQ_HZ (100_000_000),
-        .BAUD_RATE   (115_200)
-    ) u_uart_echo (
-        .clk         (clk_sys_100m),
-        .reset       (rst_sys),
-        .uart_rxd    (uart_rxd),
-        .uart_txd    (uart_txd),
-        .overflow    (uart_overflow),
-        .frame_error (uart_frame_error)
-    );
-
-    // M1 临时使用 VIO 提供运行时参数；M3 接入寄存器文件后替换此参数源。
-    vio_m1 u_vio_m1 (
-        .clk        (clk_sys_100m),
-        .probe_out0 (wave_sel_ch1),
-        .probe_out1 (ftw_ch1),
-        .probe_out2 (amplitude_q15_ch1),
-        .probe_out3 (dc_code_ch1),
-        .probe_out4 (wave_sel_ch2),
-        .probe_out5 (ftw_ch2),
-        .probe_out6 (amplitude_q15_ch2),
-        .probe_out7 (dc_code_ch2)
+        .BAUD_RATE   (921_600)
+    ) u_control_plane (
+        .clk_sys                    (clk_sys_100m),
+        .reset_sys                  (rst_sys),
+        .clk_adc                    (clk_adc_read_65m),
+        .reset_adc                  (rst_adc_read),
+        .uart_rxd                   (uart_rxd),
+        .uart_txd                   (uart_txd),
+        .ddr_calibrated             (1'b0),
+        .network_link_up            (1'b0),
+        .adc_clock_alive            (adc_clock_alive),
+        .mmcm_locked                (mmcm_locked),
+        .dac_update_rate_ch1_hz     (dac_update_rate_ch1_hz),
+        .dac_update_rate_ch2_hz     (dac_update_rate_ch2_hz),
+        .wave_sel_ch1               (wave_sel_ch1),
+        .ftw_ch1                    (ftw_ch1),
+        .amplitude_q15_ch1          (amplitude_q15_ch1),
+        .dc_code_ch1                (dc_code_ch1),
+        .gain_q15_ch1               (gain_q15_ch1),
+        .offset_code_ch1            (offset_code_ch1),
+        .wave_sel_ch2               (wave_sel_ch2),
+        .ftw_ch2                    (ftw_ch2),
+        .amplitude_q15_ch2          (amplitude_q15_ch2),
+        .dc_code_ch2                (dc_code_ch2),
+        .gain_q15_ch2               (gain_q15_ch2),
+        .offset_code_ch2            (offset_code_ch2),
+        .adc_config_active          (adc_control_config),
+        .adc_config_apply_count     (adc_control_apply_count),
+        .adc_clear_count            (adc_control_clear_count),
+        .adc_control_armed          (adc_control_armed),
+        .protocol_error             (uart_protocol_error),
+        .uart_frame_error           (uart_frame_error),
+        .last_error                 (control_last_error),
+        .crc_error_count            (control_crc_error_count),
+        .uart_frame_error_count     (control_uart_frame_error_count),
+        .command_error_count        (control_command_error_count),
+        .config_sequence            (control_config_sequence)
     );
 
     // M2 相位扫描控制：每次切换 request_toggle 后移动 step_count 个细相移步进。
@@ -185,10 +221,14 @@ module Top (
         .ftw_ch1           (ftw_ch1),
         .amplitude_q15_ch1 (amplitude_q15_ch1),
         .dc_code_ch1       (dc_code_ch1),
+        .gain_q15_ch1      (gain_q15_ch1),
+        .offset_code_ch1   (offset_code_ch1),
         .wave_sel_ch2      (wave_sel_ch2),
         .ftw_ch2           (ftw_ch2),
         .amplitude_q15_ch2 (amplitude_q15_ch2),
         .dc_code_ch2       (dc_code_ch2),
+        .gain_q15_ch2      (gain_q15_ch2),
+        .offset_code_ch2   (offset_code_ch2),
         .dac_sclk          (dac_sclk),
         .dac_cs1_n         (dac_cs1_n),
         .dac_cs2_n         (dac_cs2_n),
@@ -203,6 +243,17 @@ module Top (
         .debug_cs1_n       (debug_dac_cs1_n),
         .debug_cs2_n       (debug_dac_cs2_n),
         .debug_mosi        (debug_dac_mosi)
+    );
+
+    dac_update_rate_meter #(
+        .CLK_FREQ_HZ (100_000_000)
+    ) u_dac_update_rate_meter (
+        .clk                    (clk_sys_100m),
+        .reset                  (rst_sys),
+        .sample_commit_ch1      (sample_commit_ch1),
+        .sample_commit_ch2      (sample_commit_ch2),
+        .update_rate_ch1_hz     (dac_update_rate_ch1_hz),
+        .update_rate_ch2_hz     (dac_update_rate_ch2_hz)
     );
 
     always @(posedge clk_sys_100m) begin
@@ -253,6 +304,9 @@ module Top (
             rst_adc_sync            <= 1'b1;
             rst_adc_read_meta       <= 1'b1;
             rst_adc_read_sync       <= 1'b1;
+            adc_read_heartbeat_prev <= 8'd0;
+            adc_alive_timeout       <= 17'd0;
+            adc_clock_alive         <= 1'b0;
         end else begin
             adc_heartbeat_meta      <= adc_heartbeat;
             adc_heartbeat_sync      <= adc_heartbeat_meta;
@@ -262,6 +316,16 @@ module Top (
             rst_adc_sync            <= rst_adc_meta;
             rst_adc_read_meta       <= rst_adc_read;
             rst_adc_read_sync       <= rst_adc_read_meta;
+
+            if (adc_read_heartbeat_sync != adc_read_heartbeat_prev) begin
+                adc_read_heartbeat_prev <= adc_read_heartbeat_sync;
+                adc_alive_timeout       <= 17'd0;
+                adc_clock_alive         <= 1'b1;
+            end else if (adc_alive_timeout < 17'd100_000) begin
+                adc_alive_timeout <= adc_alive_timeout + 1'b1;
+            end else begin
+                adc_clock_alive <= 1'b0;
+            end
         end
     end
 
@@ -274,7 +338,7 @@ module Top (
         .probe3 (rst_sys),
         .probe4 (rst_adc_sync),
         .probe5 (rst_adc_read_sync),
-        .probe6 (uart_overflow),
+        .probe6 (uart_protocol_error),
         .probe7 (uart_frame_error)
     );
 

@@ -8,10 +8,14 @@ module tb_signal_gen_m1;
     reg  [31:0] ftw_ch1;
     reg  [15:0] amplitude_q15_ch1;
     reg  [15:0] dc_code_ch1;
+    reg  [15:0] gain_q15_ch1;
+    reg  signed [15:0] offset_code_ch1;
     reg  [1:0]  wave_sel_ch2;
     reg  [31:0] ftw_ch2;
     reg  [15:0] amplitude_q15_ch2;
     reg  [15:0] dc_code_ch2;
+    reg  [15:0] gain_q15_ch2;
+    reg  signed [15:0] offset_code_ch2;
 
     wire        dac_sclk;
     wire        dac_cs1_n;
@@ -36,10 +40,14 @@ module tb_signal_gen_m1;
         .ftw_ch1           (ftw_ch1),
         .amplitude_q15_ch1 (amplitude_q15_ch1),
         .dc_code_ch1       (dc_code_ch1),
+        .gain_q15_ch1      (gain_q15_ch1),
+        .offset_code_ch1   (offset_code_ch1),
         .wave_sel_ch2      (wave_sel_ch2),
         .ftw_ch2           (ftw_ch2),
         .amplitude_q15_ch2 (amplitude_q15_ch2),
         .dc_code_ch2       (dc_code_ch2),
+        .gain_q15_ch2      (gain_q15_ch2),
+        .offset_code_ch2   (offset_code_ch2),
         .dac_sclk          (dac_sclk),
         .dac_cs1_n         (dac_cs1_n),
         .dac_cs2_n         (dac_cs2_n),
@@ -107,10 +115,14 @@ module tb_signal_gen_m1;
         ftw_ch1           = 32'h4000_0000;
         amplitude_q15_ch1 = 16'h8000;
         dc_code_ch1       = 16'h8000;
+        gain_q15_ch1      = 16'h8000;
+        offset_code_ch1   = 16'sd0;
         wave_sel_ch2      = 2'd1;
         ftw_ch2           = 32'h4000_0000;
         amplitude_q15_ch2 = 16'h8000;
         dc_code_ch2       = 16'h8000;
+        gain_q15_ch2      = 16'h8000;
+        offset_code_ch2   = 16'sd0;
 
         apply_reset();
 
@@ -146,6 +158,21 @@ module tb_signal_gen_m1;
             $display("[PASS] zero-FTW channel held phase and DC code");
         end
 
+        // 第三组：校准增益和零点偏移围绕中点码生效。
+        ftw_ch1         = 32'd0;
+        dc_code_ch1     = 16'hC000;
+        gain_q15_ch1    = 16'h4000;
+        offset_code_ch1 = 16'sh0100;
+        ftw_ch2         = 32'd0;
+        dc_code_ch2     = 16'h4000;
+        gain_q15_ch2    = 16'h8000;
+        offset_code_ch2 = -16'sh0100;
+
+        apply_reset();
+
+        expect_frame(1, 16'hA100);
+        expect_frame(2, 16'h3F00);
+
         if (failures == 0) begin
             $display("M1_SIGNAL_GEN_SIM_PASS");
         end else begin
@@ -162,4 +189,3 @@ module tb_signal_gen_m1;
     end
 
 endmodule
-

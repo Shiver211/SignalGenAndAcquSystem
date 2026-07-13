@@ -137,4 +137,4 @@ CH2: FTW=0, dc_code=0x9234
      observed code  = 0x9234, phase value count=1
 ```
 
-当前 FPGA 已恢复默认配置：CH1 正弦 1kHz/约 1Vpk，CH2 三角 2kHz/约 2Vpk。
+2026-07-13 环回诊断中，M1 ILA 已确认 CH1 在 `FTW=0`、`dc_code=0x4000` 时的数字输出稳定为 `0x4000`。当前 FPGA 将两路保持为中点直流（`FTW=0`、`dc_code=0x8000`）；实际电压由各通道物理单/双极性跳帽决定。B 路双极性 ±2.5V 直流和跨零 50kHz 正弦已通过 AD9226 环回验证。

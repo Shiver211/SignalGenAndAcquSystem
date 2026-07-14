@@ -14,7 +14,22 @@ module Top (
     input  wire adc_ora,
     output wire adc_clk_b,
     input  wire [11:0] adc_data_b,
-    input  wire adc_orb
+    input  wire adc_orb,
+    inout  wire [15:0] ddr3_dq,
+    inout  wire [1:0] ddr3_dqs_n,
+    inout  wire [1:0] ddr3_dqs_p,
+    output wire [13:0] ddr3_addr,
+    output wire [2:0] ddr3_ba,
+    output wire ddr3_ras_n,
+    output wire ddr3_cas_n,
+    output wire ddr3_we_n,
+    output wire ddr3_reset_n,
+    output wire [0:0] ddr3_ck_p,
+    output wire [0:0] ddr3_ck_n,
+    output wire [0:0] ddr3_cke,
+    output wire [0:0] ddr3_cs_n,
+    output wire [1:0] ddr3_dm,
+    output wire [0:0] ddr3_odt
 );
 
     wire clk_sys_100m;
@@ -30,6 +45,10 @@ module Top (
     reg        adc_read_heartbeat_prev;
     reg [16:0] adc_alive_timeout;
     reg        adc_clock_alive;
+    wire       ddr_calibrated_ui;
+    wire       ddr_test_error;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg ddr_calibrated_meta;
+    (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg ddr_calibrated_sync;
 
     wire [1:0]  wave_sel_ch1;
     wire [31:0] ftw_ch1;
@@ -80,6 +99,30 @@ module Top (
         .adc_clk_b   (adc_clk_b)
     );
 
+    ddr3_subsystem_m4 u_ddr3_subsystem_m4 (
+        .clk_sys_100m       (clk_sys_100m),
+        .reset_sys          (rst_sys),
+        .sys_rst_n          (sys_rst_n),
+        .system_mmcm_locked (mmcm_locked),
+        .ddr3_dq            (ddr3_dq),
+        .ddr3_dqs_n         (ddr3_dqs_n),
+        .ddr3_dqs_p         (ddr3_dqs_p),
+        .ddr3_addr          (ddr3_addr),
+        .ddr3_ba            (ddr3_ba),
+        .ddr3_ras_n         (ddr3_ras_n),
+        .ddr3_cas_n         (ddr3_cas_n),
+        .ddr3_we_n          (ddr3_we_n),
+        .ddr3_reset_n       (ddr3_reset_n),
+        .ddr3_ck_p          (ddr3_ck_p),
+        .ddr3_ck_n          (ddr3_ck_n),
+        .ddr3_cke           (ddr3_cke),
+        .ddr3_cs_n          (ddr3_cs_n),
+        .ddr3_dm            (ddr3_dm),
+        .ddr3_odt           (ddr3_odt),
+        .ddr_calibrated     (ddr_calibrated_ui),
+        .ddr_test_error     (ddr_test_error)
+    );
+
     ad9226_capture u_ad9226_capture (
         .clk_adc_read_65m (clk_adc_read_65m),
         .reset             (rst_adc_read),
@@ -108,7 +151,7 @@ module Top (
         .reset_adc                  (rst_adc_read),
         .uart_rxd                   (uart_rxd),
         .uart_txd                   (uart_txd),
-        .ddr_calibrated             (1'b0),
+        .ddr_calibrated             (ddr_calibrated_sync),
         .network_link_up            (1'b0),
         .adc_clock_alive            (adc_clock_alive),
         .mmcm_locked                (mmcm_locked),
@@ -189,7 +232,12 @@ module Top (
             adc_read_heartbeat_prev <= 1'b0;
             adc_alive_timeout       <= 17'd0;
             adc_clock_alive         <= 1'b0;
+            ddr_calibrated_meta     <= 1'b0;
+            ddr_calibrated_sync     <= 1'b0;
         end else begin
+            ddr_calibrated_meta <= ddr_calibrated_ui;
+            ddr_calibrated_sync <= ddr_calibrated_meta;
+
             adc_read_heartbeat_meta <= adc_read_heartbeat[0];
             adc_read_heartbeat_sync <= adc_read_heartbeat_meta;
 

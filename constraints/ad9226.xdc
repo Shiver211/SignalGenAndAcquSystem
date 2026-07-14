@@ -57,8 +57,8 @@ set_input_delay -clock adc_clk_b_out -max 7.000 \
     [get_ports {adc_data_b[*] adc_orb}]
 
 # 相位位置采用已寄存 Gray 码跨域；仅放宽两级同步器的第一级 D 端。
-set_false_path -to [get_pins -of_objects \
-    [get_cells -hierarchical -filter {
+set_false_path -quiet -to [get_pins -quiet -of_objects \
+    [get_cells -quiet -hierarchical -filter {
         NAME =~ *phase_gray_meta_reg* ||
         NAME =~ *phase_busy_adc_meta_reg ||
         NAME =~ *phase_done_adc_meta_reg

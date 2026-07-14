@@ -11,6 +11,9 @@ module tb_clock_reset_m0;
     wire rst_adc;
     wire rst_adc_read;
     wire mmcm_locked;
+    wire phase_busy;
+    wire phase_done_toggle;
+    wire signed [15:0] phase_position;
     wire [7:0] adc_heartbeat;
     wire [7:0] adc_read_heartbeat;
 
@@ -24,6 +27,9 @@ module tb_clock_reset_m0;
     clock_reset_m0 u_dut (
         .sys_clk            (sys_clk),
         .sys_rst_n          (sys_rst_n),
+        .phase_request_toggle(1'b0),
+        .phase_direction_inc(1'b1),
+        .phase_step_count   (10'd0),
         .clk_sys_100m       (clk_sys_100m),
         .clk_adc_65m        (clk_adc_65m),
         .clk_adc_read_65m   (clk_adc_read_65m),
@@ -31,6 +37,9 @@ module tb_clock_reset_m0;
         .rst_adc            (rst_adc),
         .rst_adc_read       (rst_adc_read),
         .mmcm_locked        (mmcm_locked),
+        .phase_busy         (phase_busy),
+        .phase_done_toggle  (phase_done_toggle),
+        .phase_position     (phase_position),
         .adc_heartbeat      (adc_heartbeat),
         .adc_read_heartbeat (adc_read_heartbeat)
     );
@@ -70,6 +79,10 @@ module tb_clock_reset_m0;
         wait (rst_sys === 1'b0 && rst_adc === 1'b0 && rst_adc_read === 1'b0);
         $display("[PASS] all resets released after MMCM lock");
 
+        // M2 已把实测稳定窗口中心 401 步（约 5.508ns）固化为上电默认相位。
+        wait (phase_busy === 1'b1);
+        wait (phase_busy === 1'b0);
+
         @(posedge clk_sys_100m);
         edge_time_1 = $realtime;
         @(posedge clk_sys_100m);
@@ -102,7 +115,8 @@ module tb_clock_reset_m0;
             $display("[PASS] 65MHz period is %0.3f ns", adc_period);
         end
 
-        if (adc_phase_offset < 3.8 || adc_phase_offset > 4.2) begin
+        if (adc_phase_offset < 5.3 || adc_phase_offset > 5.7 ||
+            phase_position !== 16'sd401) begin
             $display("[FAIL] ADC read clock offset is %0.3f ns", adc_phase_offset);
             failures = failures + 1;
         end else begin

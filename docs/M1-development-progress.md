@@ -2,7 +2,7 @@
 
 > 阶段：DAC8830 双通道信号发生  
 > 开始日期：2026-07-10  
-> 当前状态：RTL、仿真、实现和 FPGA 数字链路已完成；等待示波器模拟输出验收
+> 当前状态：RTL、仿真、实现、FPGA 数字链路和双通道示波器模拟输出验收均已完成
 
 ## 1. M1 验收范围
 
@@ -14,7 +14,7 @@
 - [x] 完成自检式 RTL 仿真。
 - [x] 完成综合、实现、DRC、CDC 和时序检查。
 - [x] 用 ILA 测量实际提交率，并按实测提交率核对 FTW。
-- [ ] 用示波器验证双通道波形、幅度和频率。
+- [x] 用示波器验证双通道波形、幅度和频率。
 
 ## 2. 硬件连接
 
@@ -96,7 +96,7 @@ FTW         = round(f_out × 2^32 / f_update_ch)
 | 比特流/调试探针 | 通过 | `Signal.runs/impl_1/Top.bit`、`Top.ltx` |
 | FPGA 下载 | 通过 | Digilent 目标上的 `xc7a35t_0` |
 | ILA/VIO 上板验证 | 通过 | 提交率、SCLK、片选、帧长、FTW、运行时波形/0Hz 参数切换均正确 |
-| 示波器波形验证 | 待执行 | — |
+| 示波器波形验证 | 通过 | A/B 正弦、三角、方波、50kHz、大幅度及双通道异频输出均正确 |
 
 默认 FTW 按 ILA 实测提交率计算：
 
@@ -106,7 +106,7 @@ FTW         = round(f_out × 2^32 / f_update_ch)
 | CH2 / 2kHz | `0x005E5F31` | `2000.000030Hz` |
 | 50kHz 验收值 | `0x09374BC7` | `50000.000111Hz` |
 
-最终资源（含 M0/M1 ILA、VIO 和 Debug Hub）：2984 LUT、5365 FF、22 BRAM Tile、2 DSP、1 MMCM、5 BUFG。
+M1 验收阶段资源（清理调试核前）：2984 LUT、5365 FF、22 BRAM Tile、2 DSP、1 MMCM、5 BUFG。
 
 厂商 IP 剩余提示：
 
@@ -138,3 +138,31 @@ CH2: FTW=0, dc_code=0x9234
 ```
 
 2026-07-13 环回诊断中，M1 ILA 已确认 CH1 在 `FTW=0`、`dc_code=0x4000` 时的数字输出稳定为 `0x4000`。当前 FPGA 将两路保持为中点直流（`FTW=0`、`dc_code=0x8000`）；实际电压由各通道物理单/双极性跳帽决定。B 路双极性 ±2.5V 直流和跨零 50kHz 正弦已通过 AD9226 环回验证。
+
+### 2026-07-14：双通道示波器验收
+
+使用 GW Instek GDS-3152 示波器完成 UART 控制下的模拟输出验收。用户确认取消小信号噪声项，该项不再属于 M1 完成条件。
+
+```text
+0V 中点：A 平均 -12.9mV，B 平均 +4.08mV
+
+A / 1kHz sine：     2.20V，1.00002kHz，mean -95.6mV
+A / 1kHz triangle： 2.24V，1.00002kHz，mean -119mV
+A / 1kHz square：   2.00V，1.00002kHz，mean -122mV，duty 49.94%
+A / 50kHz sine：    2.20V，50.0011kHz，mean -106mV
+A / 1kHz 4Vpk：     8.24V，峰顶/谷底无削平
+
+B / 1kHz sine：     2.32V，1.00003kHz
+B / 1kHz triangle： 2.28V，1.00002kHz，mean -110mV
+B / 1kHz square：   2.00V，1.00002kHz，mean -105mV，duty 50.00%
+B / 50kHz sine：    2.20V，50.0014kHz，mean -128mV
+B / 1kHz 4Vpk：     8.16V，mean -83.4mV，峰顶/谷底无削平
+
+双通道同时输出：
+A = 1kHz sine / 1Vpk，实测 999.8Hz / 2.28V
+B = 2kHz triangle / 0.5Vpk，实测 2.00006kHz / 光标约 1.21Vpp
+```
+
+两路波形类型和频率互不串改，50kHz 频率误差均小于 0.003%，约 80% 满量程时未发生削顶。M1 示波器验收完成。
+
+2026-07-14 验收完成后，M0/M1/M2 ILA 与 M1/M2 VIO 已从工程删除；最终全工程仅保留功能逻辑和正弦 ROM。

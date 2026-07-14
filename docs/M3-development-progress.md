@@ -2,7 +2,7 @@
 
 > 阶段：UART 控制协议、参数寄存器和 CDC  
 > 开始日期：2026-07-13  
-> 当前状态：RTL、协议自检、M1 回归、综合、实现、比特流、FPGA 下载和 921600 UART 上板验证均已完成；示波器相关验收按用户要求暂缓
+> 当前状态：RTL、协议自检、M1 回归、综合、实现、比特流、FPGA 下载、921600 UART 和示波器上板验证均已完成
 
 ## 1. M3 验收范围
 
@@ -19,8 +19,8 @@
 - [x] 提供 Python 串口调试工具，默认波特率为 921600。
 - [x] 完成自检仿真、综合、实现、DRC、CDC、时序和上板串口验证。
 - [x] 使用 UART 配置 DAC A，并通过 `DAC A0 → ADC INA` 完成最终 M3 固件下的数字回环验证。
-- [ ] 使用示波器观察 UART 改参后的 DAC 模拟输出变化。
-- [ ] M1/M2 示波器独立验收完成后删除旧 ILA/VIO 调试核。
+- [x] 使用示波器观察 UART 改参后的 DAC 模拟输出变化。
+- [x] M1/M2 验收完成后删除旧 ILA/VIO 调试核。
 
 ## 2. 实现结构
 
@@ -80,10 +80,9 @@ scripts/m3_uart_cli.py               # 921600 串口调试工具
 scripts/run_m3_sim.tcl               # M1/M3 回归仿真
 scripts/run_m3_build.tcl             # 综合、实现和报告生成
 scripts/program_m3.tcl               # FPGA 下载
-scripts/capture_m3_uart_scenario.tcl # UART 改参后的 M1 ILA 捕获
 ```
 
-M1 的 `vio_m1` 已从 `Top.v` 删除，发生参数改由 UART 寄存器驱动。M2 相位扫描 `vio_m2` 以及 M0/M1/M2 ILA 暂时保留，等待示波器验收完成后统一清理。
+M1/M2 验收完成后，M0/M1/M2 ILA 与 M1/M2 VIO 已全部从工程删除；发生参数由 UART 寄存器驱动，ADC 读相位固定为已验证窗口中心 401 步（约 5.508ns）。
 
 ## 4. 仿真与静态验证
 
@@ -97,21 +96,21 @@ M1 的 `vio_m1` 已从 `Top.v` 删除，发生参数改由 UART 寄存器驱动�
 | ADC 配置原子 CDC | 通过 | 167bit 快照完整跨域，提交序号和目的域应用计数一致 |
 | ARM/STOP/CLEAR CDC | 通过 | 三种脉冲均只在 ADC 域产生一次 |
 | 综合 DRC | 通过 | 0 条违规；两路校准 DSP 使用完整输入/乘法/输出流水 |
-| Routed 时序 | 通过 | WNS=`1.838ns`、WHS=`0.057ns`、WPWS=`3.870ns`，失败端点为 0 |
-| Route status | 通过 | 12182/12182 个 routable nets 全部完成，routing errors=0 |
+| Routed 时序 | 通过 | WNS=`1.801ns`、WHS=`0.086ns`、WPWS=`4.000ns`，失败端点为 0 |
+| Route status | 通过 | 2900/2900 个 routable nets 全部完成，routing errors=0 |
 | DAC 管脚时序 | 通过 | SCLK=`3.352ns`、MOSI=`3.338ns`、CS1=`4.118ns`、CS2=`4.162ns`，均小于 6ns |
-| 比特流与探针 | 通过 | `Signal.runs/impl_1/Top.bit`、`Top.ltx` |
+| 比特流 | 通过 | `Signal.runs/impl_1/Top.bit` |
 
-最终 routed DRC 仅剩既有 Debug Hub 内部的 `PDCN-1569 ×3` 和 `RTSTAT-10 ×1`，无用户 RTL 违规。
+最终 routed DRC 和 Methodology 均为 0 条违规。
 
-M3 新增 CDC 在 `report_cdc` 中均识别为安全的 `CDC-3`：UART 输入同步、167bit 握手控制、ARM/STOP/CLEAR 脉冲和 ADC ARM 状态返回。全设计剩余 `CDC-10 ×2`、`CDC-15 ×36` 位于旧 `u_ila_m2` 内部；`CDC-6 ×5` 来自既有心跳诊断、相位 Gray 总线和 ILA 内部逻辑。
+全设计 CDC 共 8 条，均识别为安全 `CDC-3`：UART 输入同步、ADC 时钟心跳、167bit 握手控制、ARM/STOP/CLEAR 脉冲和 ADC ARM 状态返回。
 
-最终资源（含保留的 M0/M1/M2 ILA、M2 VIO 和 Debug Hub）：
+删除调试核后的最终资源：
 
 ```text
-Slice LUTs       = 5340 / 20800  (25.67%)
-Slice Registers  = 8541 / 41600  (20.53%)
-Block RAM Tile   = 41.5 / 50     (83.00%)
+Slice LUTs       = 1594 / 20800  (7.66%)
+Slice Registers  = 1897 / 41600  (4.56%)
+Block RAM Tile   = 2 / 50        (4.00%)
 DSP              = 4 / 90       (4.44%)
 MMCM             = 1
 BUFG             = 5
@@ -119,9 +118,9 @@ BUFG             = 5
 
 ## 5. 上板验证
 
-最终比特流已下载到 Digilent 目标 `xc7a35t_0`，调试核识别为 3 个 ILA 和 1 个 VIO。
+最终比特流已下载到 Digilent 目标 `xc7a35t_0`；Hardware Manager 确认设计中不存在软调试核。
 
-CH340 端口为 `COM11`，状态查询结果：
+本次下载后 CH340 端口为 `COM14`，状态查询结果：
 
 ```text
 protocol_version       = 1.0
@@ -194,8 +193,8 @@ ADC A OTR              = 0
 
 最终板上状态为两路中点直流、未 ARM、连续包络关闭。
 
-## 6. 暂缓项
+## 6. 后续项
 
-- 因当前没有示波器，M1 的独立模拟波形幅度、频率和波形质量验收继续暂缓。
-- M2 的 DAC→ADC 数字环回和相位扫描已完成，不重复执行示波器验收。
-- 旧 ILA/VIO 占用 41.5 个 BRAM Tile；在示波器验收完成前保留，后续阶段若资源不足再按用户确认处理。
+- 2026-07-14 已完成 M1 双通道示波器验收；用户取消小信号噪声项，不再将其作为完成条件。
+- M2 的 DAC→ADC 数字环回和相位扫描此前已完成，无需重复验证。
+- 旧 ILA/VIO 已删除，调试用 BRAM 已释放。

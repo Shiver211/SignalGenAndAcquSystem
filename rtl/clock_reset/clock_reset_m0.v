@@ -56,10 +56,10 @@ module clock_reset_m0 (
         .reset   (rst_adc_read)
     );
 
-    // Fine-PS 模式从 0°启动。VCO=1300MHz 时每步约 13.736ps，
-    // 289 步对应约 3.970ns，复现 M0 的约 +4ns 初始读相位。
+    // M2 相位扫描选择 401 步作为稳定窗口中心；删除 VIO 后固定为该值。
+    // VCO=1300MHz 时每步约 13.736ps，401 步对应约 5.508ns。
     mmcm_phase_shift_ctrl #(
-        .INITIAL_STEPS (10'd289)
+        .INITIAL_STEPS (10'd401)
     ) u_mmcm_phase_shift_ctrl (
         .clk            (clk_sys_100m),
         .reset          (rst_sys),

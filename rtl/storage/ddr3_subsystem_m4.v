@@ -56,9 +56,18 @@ module ddr3_subsystem_m4 (
     wire [27:0]  first_error_address;
     wire [127:0] first_expected_data;
     wire [127:0] first_actual_data;
+    wire [31:0]  write_throughput_mb_s;
+    wire [31:0]  read_throughput_mb_s;
     wire [31:0]  peak_write_throughput_mb_s;
+    wire [31:0]  peak_read_throughput_mb_s;
+    wire [127:0] telemetry_or_expected_data;
 
     assign ddr_test_error = (error_count != 32'd0);
+    // 无错误时复用期望数据探针传输四个 32bit 遥测量；出错后恢复首错期望值。
+    assign telemetry_or_expected_data = (error_count == 32'd0)
+        ? {calibration_cycles, write_throughput_mb_s,
+           read_throughput_mb_s, peak_read_throughput_mb_s}
+        : first_expected_data;
 
     clk_ref_200m_m4 u_clk_ref_200m_m4 (
         .clk_ref_200m (clk_ref_200m),
@@ -142,10 +151,10 @@ module ddr3_subsystem_m4 (
         .first_actual_data             (first_actual_data),
         .write_bytes                   (),
         .read_bytes                    (),
-        .write_throughput_mb_s         (),
-        .read_throughput_mb_s          (),
+        .write_throughput_mb_s         (write_throughput_mb_s),
+        .read_throughput_mb_s          (read_throughput_mb_s),
         .peak_write_throughput_mb_s    (peak_write_throughput_mb_s),
-        .peak_read_throughput_mb_s     ()
+        .peak_read_throughput_mb_s     (peak_read_throughput_mb_s)
     );
 
     ila_m4 u_ila_m4 (
@@ -160,7 +169,7 @@ module ddr3_subsystem_m4 (
         .probe7  (completed_sweeps),
         .probe8  (peak_write_throughput_mb_s),
         .probe9  (first_error_address),
-        .probe10 (first_expected_data),
+        .probe10 (telemetry_or_expected_data),
         .probe11 (first_actual_data)
     );
 

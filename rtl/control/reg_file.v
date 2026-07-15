@@ -79,11 +79,23 @@ module reg_file #(
     localparam [7:0] STATUS_NO_FRAME       = 8'h05;
     localparam [7:0] STATUS_INTERNAL_ERROR = 8'h06;
 
+    localparam [31:0] RAW_MAX_SAMPLES = 32'd58_720_256;
+    localparam [31:0] DEC_MAX_SAMPLES = 32'd8_388_608;
+
     localparam [0:0] ST_IDLE     = 1'b0;
     localparam [0:0] ST_WAIT_CFG = 1'b1;
 
     reg state;
     reg [7:0] pending_response_cmd;
+
+    function is_supported_decimation;
+        input [31:0] value;
+        begin
+            is_supported_decimation =
+                (value >= 32'd1) && (value <= 32'd1024) &&
+                ((value & (value - 1'b1)) == 32'd0);
+        end
+    endfunction
 
     reg [1:0]  wave_sel_shadow_ch1;
     reg [31:0] ftw_shadow_ch1;
@@ -356,7 +368,9 @@ module reg_file #(
                                         (acquisition_hysteresis[15:12] != 4'd0) ||
                                         (payload_5 > 8'd1) ||
                                         (acquisition_depth == 32'd0) ||
-                                        (acquisition_depth > 32'h0400_0000) ||
+                                        (acquisition_depth > RAW_MAX_SAMPLES) ||
+                                        ((data_mode_shadow == 2'd2) &&
+                                         (acquisition_depth > DEC_MAX_SAMPLES)) ||
                                         (acquisition_pretrigger > 16'd1000) ||
                                         ((payload_12 & 8'hFE) != 8'd0)) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
@@ -396,9 +410,11 @@ module reg_file #(
                                 CMD_SET_PROCESSING: begin
                                     if ((command_len != 8'd14) ||
                                         (payload_0 > 8'd2) ||
-                                        (processing_decimation == 32'd0) ||
+                                        !is_supported_decimation(processing_decimation) ||
                                         (processing_points == 32'd0) ||
                                         (processing_refresh == 32'd0) ||
+                                        ((payload_0 == 8'd2) &&
+                                         (capture_depth_shadow > DEC_MAX_SAMPLES)) ||
                                         ((payload_13 & 8'hFE) != 8'd0)) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);

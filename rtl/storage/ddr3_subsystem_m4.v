@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-// M4 DDR3 子系统：参考时钟、MIG、自动压力测试和临时 ILA。
+// M4 DDR3 子系统：参考时钟、MIG 和自动压力测试。
 module ddr3_subsystem_m4 (
     input  wire        clk_sys_100m,
     input  wire        reset_sys,
@@ -46,28 +46,16 @@ module ddr3_subsystem_m4 (
     wire         ui_clk_sync_rst;
     wire [11:0]  device_temp;
 
-    wire [3:0]   test_state;
-    wire [2:0]   pattern_index;
-    wire [1:0]   region_index;
-    wire [27:0]  current_address;
     wire [31:0]  calibration_cycles;
     wire [31:0]  completed_sweeps;
     wire [31:0]  error_count;
-    wire [27:0]  first_error_address;
     wire [127:0] first_expected_data;
-    wire [127:0] first_actual_data;
     wire [31:0]  write_throughput_mb_s;
     wire [31:0]  read_throughput_mb_s;
     wire [31:0]  peak_write_throughput_mb_s;
     wire [31:0]  peak_read_throughput_mb_s;
-    wire [127:0] telemetry_or_expected_data;
 
     assign ddr_test_error = (error_count != 32'd0);
-    // 无错误时复用期望数据探针传输四个 32bit 遥测量；出错后恢复首错期望值。
-    assign telemetry_or_expected_data = (error_count == 32'd0)
-        ? {calibration_cycles, write_throughput_mb_s,
-           read_throughput_mb_s, peak_read_throughput_mb_s}
-        : first_expected_data;
 
     clk_ref_200m_m4 u_clk_ref_200m_m4 (
         .clk_ref_200m (clk_ref_200m),
@@ -138,39 +126,23 @@ module ddr3_subsystem_m4 (
         .app_rd_data_valid             (app_rd_data_valid),
         .test_active                   (),
         .test_pass                     (),
-        .state_debug                   (test_state),
-        .pattern_index                 (pattern_index),
-        .region_index                  (region_index),
-        .current_address               (current_address),
+        .state_debug                   (),
+        .pattern_index                 (),
+        .region_index                  (),
+        .current_address               (),
         .calibration_cycles            (calibration_cycles),
         .completed_pattern_passes      (),
         .completed_sweeps              (completed_sweeps),
         .error_count                   (error_count),
-        .first_error_address           (first_error_address),
+        .first_error_address           (),
         .first_expected_data           (first_expected_data),
-        .first_actual_data             (first_actual_data),
+        .first_actual_data             (),
         .write_bytes                   (),
         .read_bytes                    (),
         .write_throughput_mb_s         (write_throughput_mb_s),
         .read_throughput_mb_s          (read_throughput_mb_s),
         .peak_write_throughput_mb_s    (peak_write_throughput_mb_s),
         .peak_read_throughput_mb_s     (peak_read_throughput_mb_s)
-    );
-
-    ila_m4 u_ila_m4 (
-        .clk     (ui_clk),
-        .probe0  (ddr_calibrated),
-        .probe1  (clk_ref_locked),
-        .probe2  (test_state),
-        .probe3  (pattern_index),
-        .probe4  (region_index),
-        .probe5  (current_address),
-        .probe6  (error_count),
-        .probe7  (completed_sweeps),
-        .probe8  (peak_write_throughput_mb_s),
-        .probe9  (first_error_address),
-        .probe10 (telemetry_or_expected_data),
-        .probe11 (first_actual_data)
     );
 
 endmodule

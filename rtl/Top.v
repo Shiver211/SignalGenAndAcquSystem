@@ -89,6 +89,22 @@ module Top (
     wire [31:0] ddr_frame_otr_a_count;
     wire [31:0] ddr_frame_otr_b_count;
     wire ddr_frame_analysis_valid;
+    wire dec_frame_valid;
+    wire [31:0] dec_frame_id;
+    wire [31:0] dec_frame_start_sample;
+    wire [31:0] dec_frame_total_samples;
+    wire dec_frame_wrapped;
+    wire m6_envelope_valid;
+    wire [63:0] m6_envelope_data;
+    wire m6_envelope_frame_done;
+    wire [31:0] m6_envelope_frame_id;
+    wire [31:0] m6_envelope_point_index;
+    wire m6_measurement_valid;
+    wire [367:0] m6_measurement_data;
+    wire [207:0] m6_raw_descriptor;
+    wire [207:0] m6_envelope_descriptor;
+    wire [207:0] m6_decimated_descriptor;
+    wire [207:0] m6_measurement_descriptor;
 
     clock_reset_m0 u_clock_reset_m0 (
         .sys_clk          (sys_clk),
@@ -117,7 +133,7 @@ module Top (
         .adc_clk_b   (adc_clk_b)
     );
 
-    ddr3_subsystem_m5 u_ddr3_subsystem_m5 (
+    ddr3_subsystem_m6 u_ddr3_subsystem_m6 (
         .clk_sys_100m       (clk_sys_100m),
         .reset_sys          (rst_sys),
         .sys_rst_n          (sys_rst_n),
@@ -131,7 +147,17 @@ module Top (
         .adc_otr_b          (adc_otr_b_captured),
         .adc_control_armed  (adc_control_armed_adc),
         .adc_control_config (adc_control_config),
+        .adc_config_apply_count(adc_control_apply_count),
         .capture_done_adc   (capture_done_adc),
+        .dec_read_request_valid(1'b0),
+        .dec_read_request_ready(),
+        .dec_read_request_start_sample(32'd0),
+        .dec_read_request_sample_count(32'd0),
+        .dec_read_sample_data(),
+        .dec_read_sample_valid(),
+        .dec_read_sample_ready(1'b1),
+        .dec_read_done_pulse(),
+        .dec_read_error(),
         .ddr3_dq            (ddr3_dq),
         .ddr3_dqs_n         (ddr3_dqs_n),
         .ddr3_dqs_p         (ddr3_dqs_p),
@@ -158,7 +184,23 @@ module Top (
         .fifo_overflow      (ddr_fifo_overflow),
         .frame_otr_a_count  (ddr_frame_otr_a_count),
         .frame_otr_b_count  (ddr_frame_otr_b_count),
-        .frame_analysis_valid(ddr_frame_analysis_valid)
+        .frame_analysis_valid(ddr_frame_analysis_valid),
+        .dec_frame_valid    (dec_frame_valid),
+        .dec_frame_id       (dec_frame_id),
+        .dec_frame_start_sample(dec_frame_start_sample),
+        .dec_frame_total_samples(dec_frame_total_samples),
+        .dec_frame_wrapped  (dec_frame_wrapped),
+        .envelope_valid     (m6_envelope_valid),
+        .envelope_data      (m6_envelope_data),
+        .envelope_frame_done(m6_envelope_frame_done),
+        .envelope_frame_id  (m6_envelope_frame_id),
+        .envelope_point_index(m6_envelope_point_index),
+        .measurement_valid  (m6_measurement_valid),
+        .measurement_data   (m6_measurement_data),
+        .raw_descriptor     (m6_raw_descriptor),
+        .envelope_descriptor(m6_envelope_descriptor),
+        .decimated_descriptor(m6_decimated_descriptor),
+        .measurement_descriptor(m6_measurement_descriptor)
     );
 
     ad9226_capture u_ad9226_capture (

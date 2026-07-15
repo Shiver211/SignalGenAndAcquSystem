@@ -2,7 +2,7 @@
 
 // 冻结帧 RAW32 块读出：请求使用环形样本索引和样本数。
 module ddr_frame_reader_m5 #(
-    parameter integer RING_SAMPLES = 67_108_864,
+    parameter integer RING_SAMPLES = 58_720_256,
     parameter [27:0] RING_BASE_APP_ADDR = 28'd0
 ) (
     input  wire         ui_clk,
@@ -138,4 +138,3 @@ module ddr_frame_reader_m5 #(
     end
 
 endmodule
-

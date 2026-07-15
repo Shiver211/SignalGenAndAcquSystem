@@ -229,19 +229,21 @@ dac_code    = 32768 + wave_signed × amplitude_vpk / 5V
 **任务**
 
 1. 实现 `envelope_minmax.v`：每 K 个样本输出 A/B 的 Min/Max。
-2. K 根据时间基准、显示点数和目标刷新率配置。
-3. 实现固定倍率低通抽取链，只支持经过验证的倍率组合。
+2. K 按 `round(65MHz×1000/(DISPLAY_POINTS×REFRESH_MILLIHZ))` 计算。
+3. 实现三级 CIC 固定倍率低通抽取链，只支持 `1/2/4/.../1024`。
 4. 抽取数据写入 DDR3 独立帧，并记录有效采样率和抽取倍率。
 5. 实现板上测量：Min、Max、均值、Vpp、OTR 计数。
-6. 实现周期测量；低频测量至少覆盖 5–10 个有效周期。
-7. 为 RAW、ENVELOPE、MEASUREMENT 定义统一的数据描述符。
+6. 实现周期和频率测量；结果至少累计 8 个有效周期后置有效。
+7. 为 RAW、ENVELOPE、DECIMATED、MEASUREMENT 定义统一的 208bit 数据描述符。
+
+M6 DDR 地址分区已固化：`0x00000000..0x0DFFFFFF` 为 224MiB RAW32，`0x0E000000..0x0FFFFFFF` 为 32MiB DECIMATED32。
 
 **验证**
 
 - 使用同一组测试向量比较 FPGA 与 Python 的 Min/Max、均值和 Vpp。
 - 包络数据能保留窄脉冲峰值；与简单抽点结果进行对比。
 - 对抽取前后正弦进行频谱检查，确认没有明显混叠。
-- 多个频点下比较板上周期测量和频率计结果。
+- 多个频点下比较板上周期/频率测量和 Python/频率计结果。
 
 **完成标准**：处理后数据与 Python 基准一致，带宽显著低于原始 ADC 数据。
 
@@ -515,6 +517,7 @@ PAYLOAD(0..1400) | CRC32(4)
 | `0x01` | RAW32：A12 + B12 + OTR_A/B + 保留位 |
 | `0x02` | ENVELOPE64：A_MIN/A_MAX/B_MIN/B_MAX，各 16bit |
 | `0x03` | MEASUREMENT_V1：固定测量结构体 |
+| `0x04` | DECIMATED32：三级 CIC 后 A12 + B12 + 窗口 OTR OR |
 
 - CRC：CRC-32/ISO-HDLC，覆盖 VERSION 至 PAYLOAD。
 - `TOTAL_SAMPLES` 使用 32bit，不再受 65535 点限制。

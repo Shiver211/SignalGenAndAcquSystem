@@ -2,7 +2,7 @@
 
 // 将带帧标记的 RAW32 流合并为 MIG 128bit 写事务，并维护环形样本指针。
 module ddr_ring_writer_m5 #(
-    parameter integer RING_SAMPLES = 67_108_864,
+    parameter integer RING_SAMPLES = 58_720_256,
     parameter [27:0] RING_BASE_APP_ADDR = 28'd0,
     parameter [31:0] INITIAL_SAMPLE_INDEX = 32'd0
 ) (
@@ -349,4 +349,3 @@ module ddr_ring_writer_m5 #(
     end
 
 endmodule
-

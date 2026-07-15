@@ -16,6 +16,7 @@ module control_plane #(
     input  wire         network_link_up,
     input  wire         adc_clock_alive,
     input  wire         mmcm_locked,
+    input  wire         adc_capture_done,
     input  wire [31:0]  dac_update_rate_ch1_hz,
     input  wire [31:0]  dac_update_rate_ch2_hz,
 
@@ -36,6 +37,7 @@ module control_plane #(
     output wire [15:0]  adc_config_apply_count,
     output wire [15:0]  adc_clear_count,
     output wire         adc_control_armed,
+    output wire         adc_control_armed_adc,
 
     output wire         protocol_error,
     output wire         uart_frame_error,
@@ -87,6 +89,7 @@ module control_plane #(
 
     assign protocol_error    = (last_error != 8'h00);
     assign adc_control_armed = adc_armed_sys;
+    assign adc_control_armed_adc = adc_armed_raw;
     assign adc_clear_count   = adc_clear_count_sys;
 
     uart_rx #(
@@ -269,6 +272,7 @@ module control_plane #(
         .arm_pulse          (arm_pulse_adc),
         .stop_pulse         (stop_pulse_adc),
         .clear_pulse        (clear_pulse_adc),
+        .capture_done       (adc_capture_done),
         .armed              (adc_armed_raw),
         .config_active      (adc_config_active),
         .config_apply_count (adc_config_apply_count),

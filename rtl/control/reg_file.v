@@ -436,7 +436,7 @@ module reg_file #(
                                     if (command_len != 8'd0) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else if (adc_config_busy) begin
+                                    end else if (adc_config_busy || adc_armed_status) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin

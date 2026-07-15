@@ -46,7 +46,6 @@ module Top (
     reg [16:0] adc_alive_timeout;
     reg        adc_clock_alive;
     wire       ddr_calibrated_ui;
-    wire       ddr_test_error;
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg ddr_calibrated_meta;
     (* ASYNC_REG = "TRUE", SHREG_EXTRACT = "NO" *) reg ddr_calibrated_sync;
 
@@ -71,6 +70,25 @@ module Top (
     wire [15:0] adc_control_apply_count;
     wire [15:0] adc_control_clear_count;
     wire adc_control_armed;
+    wire adc_control_armed_adc;
+    wire capture_done_adc;
+
+    wire [11:0] adc_code_a_captured;
+    wire [11:0] adc_code_b_captured;
+    wire adc_otr_a_captured;
+    wire adc_otr_b_captured;
+    wire adc_sample_valid;
+    wire ddr_frame_valid;
+    wire [31:0] ddr_frame_id;
+    wire [31:0] ddr_frame_start_sample;
+    wire [31:0] ddr_frame_trigger_sample;
+    wire [31:0] ddr_frame_total_samples;
+    wire [31:0] ddr_frame_trigger_index;
+    wire ddr_frame_wrapped;
+    wire ddr_fifo_overflow;
+    wire [31:0] ddr_frame_otr_a_count;
+    wire [31:0] ddr_frame_otr_b_count;
+    wire ddr_frame_analysis_valid;
 
     clock_reset_m0 u_clock_reset_m0 (
         .sys_clk          (sys_clk),
@@ -99,11 +117,21 @@ module Top (
         .adc_clk_b   (adc_clk_b)
     );
 
-    ddr3_subsystem_m4 u_ddr3_subsystem_m4 (
+    ddr3_subsystem_m5 u_ddr3_subsystem_m5 (
         .clk_sys_100m       (clk_sys_100m),
         .reset_sys          (rst_sys),
         .sys_rst_n          (sys_rst_n),
         .system_mmcm_locked (mmcm_locked),
+        .clk_adc_read_65m   (clk_adc_read_65m),
+        .reset_adc_read     (rst_adc_read),
+        .adc_sample_valid   (adc_sample_valid),
+        .adc_code_a         (adc_code_a_captured),
+        .adc_code_b         (adc_code_b_captured),
+        .adc_otr_a          (adc_otr_a_captured),
+        .adc_otr_b          (adc_otr_b_captured),
+        .adc_control_armed  (adc_control_armed_adc),
+        .adc_control_config (adc_control_config),
+        .capture_done_adc   (capture_done_adc),
         .ddr3_dq            (ddr3_dq),
         .ddr3_dqs_n         (ddr3_dqs_n),
         .ddr3_dqs_p         (ddr3_dqs_p),
@@ -120,7 +148,17 @@ module Top (
         .ddr3_dm            (ddr3_dm),
         .ddr3_odt           (ddr3_odt),
         .ddr_calibrated     (ddr_calibrated_ui),
-        .ddr_test_error     (ddr_test_error)
+        .frame_valid        (ddr_frame_valid),
+        .frame_id           (ddr_frame_id),
+        .frame_start_sample (ddr_frame_start_sample),
+        .frame_trigger_sample(ddr_frame_trigger_sample),
+        .frame_total_samples(ddr_frame_total_samples),
+        .frame_trigger_index(ddr_frame_trigger_index),
+        .frame_wrapped      (ddr_frame_wrapped),
+        .fifo_overflow      (ddr_fifo_overflow),
+        .frame_otr_a_count  (ddr_frame_otr_a_count),
+        .frame_otr_b_count  (ddr_frame_otr_b_count),
+        .frame_analysis_valid(ddr_frame_analysis_valid)
     );
 
     ad9226_capture u_ad9226_capture (
@@ -132,11 +170,11 @@ module Top (
         .adc_otr_b         (adc_orb),
         .raw_a             (),
         .raw_b             (),
-        .code_a            (),
-        .code_b            (),
-        .otr_a             (),
-        .otr_b             (),
-        .sample_valid      (),
+        .code_a            (adc_code_a_captured),
+        .code_b            (adc_code_b_captured),
+        .otr_a             (adc_otr_a_captured),
+        .otr_b             (adc_otr_b_captured),
+        .sample_valid      (adc_sample_valid),
         .sample_count      ()
     );
 
@@ -155,6 +193,7 @@ module Top (
         .network_link_up            (1'b0),
         .adc_clock_alive            (adc_clock_alive),
         .mmcm_locked                (mmcm_locked),
+        .adc_capture_done           (capture_done_adc),
         .dac_update_rate_ch1_hz     (dac_update_rate_ch1_hz),
         .dac_update_rate_ch2_hz     (dac_update_rate_ch2_hz),
         .wave_sel_ch1               (wave_sel_ch1),
@@ -173,6 +212,7 @@ module Top (
         .adc_config_apply_count     (adc_control_apply_count),
         .adc_clear_count            (adc_control_clear_count),
         .adc_control_armed          (adc_control_armed),
+        .adc_control_armed_adc      (adc_control_armed_adc),
         .protocol_error             (),
         .uart_frame_error           (),
         .last_error                 (),

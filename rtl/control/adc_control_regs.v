@@ -10,6 +10,7 @@ module adc_control_regs #(
     input  wire                    arm_pulse,
     input  wire                    stop_pulse,
     input  wire                    clear_pulse,
+    input  wire                    capture_done,
 
     output reg                     armed,
     (* KEEP = "TRUE" *) output reg [CONFIG_WIDTH-1:0] config_active,
@@ -46,7 +47,7 @@ module adc_control_regs #(
             if (arm_pulse) begin
                 armed <= 1'b1;
             end
-            if (stop_pulse) begin
+            if (stop_pulse || capture_done) begin
                 armed <= 1'b0;
             end
             if (clear_pulse) begin

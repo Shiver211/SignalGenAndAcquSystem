@@ -258,7 +258,9 @@ module Top (
         .dest_clk(clk_sys_100m), .dest_out(raw_metadata_sys)
     );
 
-    network_subsystem_m7 u_network_subsystem_m7 (
+    network_subsystem_m7 #(
+        .UDP_PORT(16'd5001)
+    ) u_network_subsystem_m7 (
         .clk_input_100m(clk_sys_100m), .sys_rst_n(sys_rst_n),
         .clk_sys_100m(clk_sys_100m), .reset_sys(rst_sys),
         .clk_adc_65m(clk_adc_read_65m), .reset_adc(rst_adc_read),

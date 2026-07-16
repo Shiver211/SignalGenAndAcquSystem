@@ -5,7 +5,7 @@ module network_tx_core_m7 #(
     parameter [47:0] LOCAL_MAC = 48'h020000000001,
     parameter [31:0] LOCAL_IP  = 32'hC0A8010A,
     parameter [31:0] REMOTE_IP = 32'hC0A80164,
-    parameter [15:0] UDP_PORT  = 16'd5000,
+    parameter [15:0] UDP_PORT  = 16'd5001,
     parameter integer CLK_FREQ_HZ = 125_000_000
 ) (
     input  wire        clk,

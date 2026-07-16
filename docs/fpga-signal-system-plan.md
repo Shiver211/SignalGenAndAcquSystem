@@ -35,7 +35,7 @@
 | M5 | 触发、DDR3 环形缓存和原始帧 | M2,M3,M4 | 触发帧完整、预触发正确 |
 | M6 | 板上包络、抽取和测量 | M5 | 与 Python 离线结果一致 |
 | M7 | Ethernet/UDP 数据上传 | M5,M6 | 原始帧分块和实时包络可接收 |
-| M8 | PyQt 上位机与 MySQL | M3,M7 | 控制、显示、存储闭环 |
+| M8 | PyQt 上位机与 SQLite | M3,M7 | 控制、显示、存储闭环 |
 | M9 | 系统联调和指标验收 | M8 | 对照指标表完成测试 |
 | M10| 130Msps 交织与校准 | M9 | 单通道高采样率波形平滑 |
 
@@ -278,11 +278,11 @@ M6 DDR 地址分区已固化：`0x00000000..0x0DFFFFFF` 为 224MiB RAW32，`0x0E
 
 **实施说明（2026-07-16）**：本轮先完成 M7 RTL、Python 协议工具、行为仿真、综合、实现、DRC、CDC 和时序验证。受实机环境安排影响，千兆链路协商、Wireshark 抓包、实际吞吐/丢包及 UART 丢块重传联调后续执行，结果统一回填 `M7-development-progress.md`。
 
-**后置实机验证（待执行）**：烧录最终 `Top.bit` 后，依次验证 PHY 1Gbps 全双工协商、UART 链路状态、Wireshark ARP/IPv4/UDP/FCS/应用 CRC、超过 64KB RAW 帧重组、丢包检测与 `0x09` 指定块重传、包络最新帧策略，以及有效吞吐和丢包率。
+**后置实机验证**：烧录最终 `Top.bit` 后，依次验证 PHY 1Gbps 全双工协商、UART 链路状态、Wireshark ARP/IPv4/UDP/FCS/应用 CRC、超过 64KB RAW 帧重组、丢包检测与 `0x09` 指定块重传、包络最新帧策略，以及有效吞吐和丢包率。
 
 ---
 
-## M8 — PyQt 上位机与 MySQL
+## M8 — PyQt 上位机与 SQLite
 
 **目标**：完成设备控制、数据接收、波形显示、测量和存储闭环。
 
@@ -295,8 +295,9 @@ M6 DDR 地址分区已固化：`0x00000000..0x0DFFFFFF` 为 224MiB RAW32，`0x0E
 5. `ui/plot_widget.py`：连续包络、抽取波形和原始帧三种显示模式。
 6. `core/waveform.py`：码值/电压换算、FFT、过零和测量复算。
 7. 控制面板：发生、触发、采集深度、预触发、时间基准、抽取倍率和显示点数。
-8. `db/mysql_store.py`：记录元数据、参数、测量值和原始帧 BLOB；禁止逐样本逐行写库。
+8. `db/sqlite_store.py`：使用 WAL 模式记录元数据、参数、测量值和完整帧 BLOB；禁止逐样本逐行写库。
 9. 增加设备状态：UART、PHY 链路、MIG 校准、采集状态、丢包数和 OTR。
+10. 固定 PC `192.168.1.100/24`、FPGA `192.168.1.10`、UDP `5001`，增加永久辅助 IP、限定 FPGA 来源的防火墙规则、一键启动和 UART/UDP 自动连接，避免与 NI UDP `5000` 冲突。
 
 **验证**
 
@@ -304,6 +305,7 @@ M6 DDR 地址分区已固化：`0x00000000..0x0DFFFFFF` 为 224MiB RAW32，`0x0E
 - 连续包络显示平稳，原始触发帧可切换查看。
 - 缺块时自动请求重传，完整帧 CRC 正确。
 - 数据可保存、查询并回放。
+- NI Time Synchronization 保持运行时，上位机仍可一键启动并接收 UDP 数据；重启应用无需重复配置 IP。
 
 **完成标准**：通信、控制、显示、测量和存储全部闭环可用。
 
@@ -532,5 +534,5 @@ PAYLOAD(0..1400) | CRC32(4)
 - M0–M3：Vivado、ILA、串口调试脚本、示波器、信号发生器。
 - M4–M6：MIG、ILA、DDR 压力测试模块、Python/Numpy 离线基准。
 - M7：Wireshark、Python UDP 测试脚本、网络吞吐量测试工具。
-- M8：Python 3、PyQt5、pyserial、PyMySQL、pyqtgraph、numpy、MySQL。
+- M8：Python 3、PyQt5、pyserial、pyqtgraph、numpy、SQLite（标准库 `sqlite3`）。
 - M9–M10：示波器、频率计、万用表、标准信号源。

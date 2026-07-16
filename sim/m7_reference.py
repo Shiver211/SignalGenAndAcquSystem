@@ -12,7 +12,7 @@ LOCAL_MAC = bytes.fromhex("020000000001")
 REMOTE_MAC = bytes.fromhex("020000000002")
 LOCAL_IP = bytes((192, 168, 1, 10))
 REMOTE_IP = bytes((192, 168, 1, 100))
-UDP_PORT = 5000
+UDP_PORT = 5001
 
 
 def crc32(data: bytes) -> int:
@@ -147,4 +147,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

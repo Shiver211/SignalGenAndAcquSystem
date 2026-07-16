@@ -16,6 +16,8 @@ xsim.dir/
 *.jou
 *.log
 *.pb
+captures/
+__pycache__/
 
 # Vivado IP：只版本化可重建配置，忽略输出产品和网表。
 ip/*/*/*

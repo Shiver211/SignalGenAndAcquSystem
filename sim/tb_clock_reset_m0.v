@@ -14,7 +14,6 @@ module tb_clock_reset_m0;
     wire phase_busy;
     wire phase_done_toggle;
     wire signed [15:0] phase_position;
-    wire [7:0] adc_heartbeat;
     wire [7:0] adc_read_heartbeat;
 
     realtime edge_time_1;
@@ -40,7 +39,6 @@ module tb_clock_reset_m0;
         .phase_busy         (phase_busy),
         .phase_done_toggle  (phase_done_toggle),
         .phase_position     (phase_position),
-        .adc_heartbeat      (adc_heartbeat),
         .adc_read_heartbeat (adc_read_heartbeat)
     );
 
@@ -126,12 +124,12 @@ module tb_clock_reset_m0;
         repeat (32) @(posedge clk_adc_65m);
         repeat (32) @(posedge clk_adc_read_65m);
 
-        if (adc_heartbeat == 8'd0 || adc_read_heartbeat == 8'd0) begin
-            $display("[FAIL] diagnostic heartbeat did not advance");
+        if (adc_read_heartbeat == 8'd0) begin
+            $display("[FAIL] ADC read heartbeat did not advance");
             failures = failures + 1;
         end else begin
-            $display("[PASS] diagnostic heartbeats advanced: adc=%0d read=%0d",
-                     adc_heartbeat, adc_read_heartbeat);
+            $display("[PASS] ADC read heartbeat advanced: read=%0d",
+                     adc_read_heartbeat);
         end
 
         sys_rst_n = 1'b0;

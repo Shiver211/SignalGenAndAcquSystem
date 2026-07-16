@@ -12,6 +12,10 @@ mcp_sim/
 .Xil/
 dfx_runtime.txt
 scripts/
+xsim.dir/
+*.jou
+*.log
+*.pb
 
 # Vivado IP：只版本化可重建配置，忽略输出产品和网表。
 ip/*/*/*
@@ -19,3 +23,9 @@ ip/*/*/*
 !ip/*/*/*.coe
 !ip/*/*/*.mem
 !ip/*/*/*.mif
+
+ip/*/*
+!ip/*/*.xci
+!ip/*/*.coe
+!ip/*/*.mem
+!ip/*/*.mif

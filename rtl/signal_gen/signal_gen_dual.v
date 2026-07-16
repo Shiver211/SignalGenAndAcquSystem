@@ -30,11 +30,7 @@ module signal_gen_dual #(
     output wire [15:0] dac_code_ch1,
     output wire [15:0] dac_code_ch2,
     output wire [31:0] phase_ch1,
-    output wire [31:0] phase_ch2,
-    output wire        debug_sclk,
-    output wire        debug_cs1_n,
-    output wire        debug_cs2_n,
-    output wire        debug_mosi
+    output wire [31:0] phase_ch2
 );
 
     wire [11:0] sine_addr_ch1;
@@ -97,11 +93,7 @@ module signal_gen_dual #(
         .dac_cs2_n         (dac_cs2_n),
         .dac_mosi          (dac_mosi),
         .sample_commit_ch1 (sample_commit_ch1),
-        .sample_commit_ch2 (sample_commit_ch2),
-        .debug_sclk        (debug_sclk),
-        .debug_cs1_n       (debug_cs1_n),
-        .debug_cs2_n       (debug_cs2_n),
-        .debug_mosi        (debug_mosi)
+        .sample_commit_ch2 (sample_commit_ch2)
     );
 
 endmodule

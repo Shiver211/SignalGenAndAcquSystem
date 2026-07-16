@@ -52,6 +52,15 @@ module reg_file #(
     input  wire [31:0]                          dac_update_rate_ch2_hz,
     input  wire [15:0]                          adc_clear_count,
 
+    input  wire                                 raw_frame_valid,
+    input  wire [31:0]                          raw_frame_id,
+    input  wire [31:0]                          raw_frame_total_bytes,
+    output reg                                  raw_upload_request,
+    output reg  [31:0]                          raw_upload_frame_id,
+    output reg  [31:0]                          raw_upload_offset,
+    output reg  [31:0]                          raw_upload_length,
+    input  wire                                 raw_upload_ready,
+
     output reg  [7:0]                           last_error,
     output reg  [31:0]                          crc_error_count,
     output reg  [31:0]                          uart_frame_error_count,
@@ -281,11 +290,18 @@ module reg_file #(
             uart_frame_error_count <= 32'd0;
             command_error_count   <= 32'd0;
             config_sequence       <= 16'd0;
+            raw_upload_request    <= 1'b0;
+            raw_upload_frame_id   <= 32'd0;
+            raw_upload_offset     <= 32'd0;
+            raw_upload_length     <= 32'd0;
         end else begin
             adc_config_send <= 1'b0;
             arm_pulse       <= 1'b0;
             stop_pulse      <= 1'b0;
             clear_pulse     <= 1'b0;
+
+            if (raw_upload_request && raw_upload_ready)
+                raw_upload_request <= 1'b0;
 
             if (response_valid && response_ready) begin
                 response_valid <= 1'b0;
@@ -519,9 +535,19 @@ module reg_file #(
                                     if (command_len != 8'd4) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else begin
+                                    end else if (!raw_frame_valid ||
+                                                 (command_payload[0 +: 32] != raw_frame_id)) begin
                                         queue_empty_response(command_cmd, STATUS_NO_FRAME);
                                         last_error <= STATUS_NO_FRAME;
+                                    end else if (raw_upload_request || !raw_upload_ready) begin
+                                        queue_empty_response(command_cmd, STATUS_BUSY);
+                                        last_error <= STATUS_BUSY;
+                                    end else begin
+                                        raw_upload_frame_id <= raw_frame_id;
+                                        raw_upload_offset   <= 32'd0;
+                                        raw_upload_length   <= raw_frame_total_bytes;
+                                        raw_upload_request  <= 1'b1;
+                                        queue_empty_response(command_cmd, STATUS_OK);
                                     end
                                 end
 
@@ -529,9 +555,28 @@ module reg_file #(
                                     if (command_len != 8'd10) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else begin
+                                    end else if (!raw_frame_valid ||
+                                                 (command_payload[0 +: 32] != raw_frame_id)) begin
                                         queue_empty_response(command_cmd, STATUS_NO_FRAME);
                                         last_error <= STATUS_NO_FRAME;
+                                    end else if ((command_payload[4 * 8 +: 32] & 32'h3) != 0 ||
+                                                 (command_payload[8 * 8 +: 16] == 16'd0) ||
+                                                 ((command_payload[8 * 8 +: 16] & 16'h3) != 0) ||
+                                                 ({16'd0, command_payload[8 * 8 +: 16]} > 32'd1400) ||
+                                                 (command_payload[4 * 8 +: 32] >= raw_frame_total_bytes) ||
+                                                 ({16'd0, command_payload[8 * 8 +: 16]} >
+                                                  raw_frame_total_bytes - command_payload[4 * 8 +: 32])) begin
+                                        queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
+                                        record_command_error(STATUS_INVALID_PARAM);
+                                    end else if (raw_upload_request || !raw_upload_ready) begin
+                                        queue_empty_response(command_cmd, STATUS_BUSY);
+                                        last_error <= STATUS_BUSY;
+                                    end else begin
+                                        raw_upload_frame_id <= raw_frame_id;
+                                        raw_upload_offset   <= command_payload[4 * 8 +: 32];
+                                        raw_upload_length   <= {16'd0, command_payload[8 * 8 +: 16]};
+                                        raw_upload_request  <= 1'b1;
+                                        queue_empty_response(command_cmd, STATUS_OK);
                                     end
                                 end
 

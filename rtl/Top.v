@@ -29,7 +29,16 @@ module Top (
     output wire [0:0] ddr3_cke,
     output wire [0:0] ddr3_cs_n,
     output wire [1:0] ddr3_dm,
-    output wire [0:0] ddr3_odt
+    output wire [0:0] ddr3_odt,
+    input  wire eth_rxc_1,
+    input  wire eth_rx_ctl_1,
+    input  wire [3:0] eth_rxd_1,
+    output wire eth_txc_1,
+    output wire eth_tx_ctl_1,
+    output wire [3:0] eth_txd_1,
+    output wire eth_rst_n,
+    output wire eth_mdc,
+    inout  wire eth_mdio
 );
 
     wire clk_sys_100m;
@@ -105,6 +114,24 @@ module Top (
     wire [207:0] m6_envelope_descriptor;
     wire [207:0] m6_decimated_descriptor;
     wire [207:0] m6_measurement_descriptor;
+    wire ddr_ui_clk;
+    wire ddr_ui_reset;
+    wire ddr_ref_clk_200m;
+    wire raw_net_read_request_valid;
+    wire raw_net_read_request_ready;
+    wire [31:0] raw_net_read_request_start_sample;
+    wire [31:0] raw_net_read_request_sample_count;
+    wire [31:0] raw_net_read_sample_data;
+    wire raw_net_read_sample_valid;
+    wire raw_net_read_sample_ready;
+    wire raw_net_read_done_pulse;
+    wire raw_net_read_error;
+    wire network_link_up;
+    wire raw_upload_ready;
+    wire raw_upload_request;
+    wire [31:0] raw_upload_frame_id;
+    wire [31:0] raw_upload_offset;
+    wire [31:0] raw_upload_length;
 
     clock_reset_m0 u_clock_reset_m0 (
         .sys_clk          (sys_clk),
@@ -122,7 +149,6 @@ module Top (
         .phase_busy       (),
         .phase_done_toggle(),
         .phase_position   (),
-        .adc_heartbeat    (),
         .adc_read_heartbeat(adc_read_heartbeat)
     );
 
@@ -149,6 +175,18 @@ module Top (
         .adc_control_config (adc_control_config),
         .adc_config_apply_count(adc_control_apply_count),
         .capture_done_adc   (capture_done_adc),
+        .ddr_ui_clk         (ddr_ui_clk),
+        .ddr_ui_reset       (ddr_ui_reset),
+        .ddr_ref_clk_200m   (ddr_ref_clk_200m),
+        .raw_net_read_request_valid(raw_net_read_request_valid),
+        .raw_net_read_request_ready(raw_net_read_request_ready),
+        .raw_net_read_request_start_sample(raw_net_read_request_start_sample),
+        .raw_net_read_request_sample_count(raw_net_read_request_sample_count),
+        .raw_net_read_sample_data(raw_net_read_sample_data),
+        .raw_net_read_sample_valid(raw_net_read_sample_valid),
+        .raw_net_read_sample_ready(raw_net_read_sample_ready),
+        .raw_net_read_done_pulse(raw_net_read_done_pulse),
+        .raw_net_read_error(raw_net_read_error),
         .dec_read_request_valid(1'b0),
         .dec_read_request_ready(),
         .dec_read_request_start_sample(32'd0),
@@ -203,6 +241,58 @@ module Top (
         .measurement_descriptor(m6_measurement_descriptor)
     );
 
+    wire [240:0] raw_metadata_sys;
+    wire [207:0] raw_descriptor_sys = raw_metadata_sys[240:33];
+    wire [31:0] raw_frame_start_sample_sys = raw_metadata_sys[32:1];
+    wire raw_frame_valid_sys = raw_metadata_sys[0];
+    wire [31:0] raw_frame_id_sys = raw_descriptor_sys[47:16];
+    wire [31:0] raw_frame_total_bytes_sys = raw_descriptor_sys[79:48] << 2;
+
+    // 冻结帧元数据在 UI 域长期稳定，整体同步到系统域供 UART 请求校验和上传快照使用。
+    xpm_cdc_array_single #(
+        .DEST_SYNC_FF(2), .INIT_SYNC_FF(1), .SIM_ASSERT_CHK(0),
+        .SRC_INPUT_REG(0), .WIDTH(241)
+    ) u_raw_metadata_cdc (
+        .src_clk(ddr_ui_clk),
+        .src_in({m6_raw_descriptor, ddr_frame_start_sample, ddr_frame_valid}),
+        .dest_clk(clk_sys_100m), .dest_out(raw_metadata_sys)
+    );
+
+    network_subsystem_m7 u_network_subsystem_m7 (
+        .clk_input_100m(clk_sys_100m), .sys_rst_n(sys_rst_n),
+        .clk_sys_100m(clk_sys_100m), .reset_sys(rst_sys),
+        .clk_adc_65m(clk_adc_read_65m), .reset_adc(rst_adc_read),
+        .clk_ref_200m(ddr_ref_clk_200m),
+        .ui_clk(ddr_ui_clk), .ui_reset(ddr_ui_reset),
+        .raw_upload_request_sys(raw_upload_request),
+        .raw_upload_ready_sys(raw_upload_ready),
+        .raw_upload_offset_sys(raw_upload_offset),
+        .raw_upload_length_sys(raw_upload_length),
+        .raw_descriptor_sys(raw_descriptor_sys),
+        .raw_frame_start_sample_sys(raw_frame_start_sample_sys),
+        .envelope_valid_adc(m6_envelope_valid),
+        .envelope_data_adc(m6_envelope_data),
+        .envelope_point_index_adc(m6_envelope_point_index),
+        .envelope_descriptor_adc(m6_envelope_descriptor),
+        .measurement_valid_adc(m6_measurement_valid),
+        .measurement_data_adc(m6_measurement_data),
+        .measurement_descriptor_adc(m6_measurement_descriptor),
+        .raw_read_request_valid(raw_net_read_request_valid),
+        .raw_read_request_ready(raw_net_read_request_ready),
+        .raw_read_request_start_sample(raw_net_read_request_start_sample),
+        .raw_read_request_sample_count(raw_net_read_request_sample_count),
+        .raw_read_sample_data(raw_net_read_sample_data),
+        .raw_read_sample_valid(raw_net_read_sample_valid),
+        .raw_read_sample_ready(raw_net_read_sample_ready),
+        .raw_read_done_pulse(raw_net_read_done_pulse),
+        .raw_read_error(raw_net_read_error),
+        .eth_rxc_1(eth_rxc_1), .eth_rxd_1(eth_rxd_1),
+        .eth_rx_ctl_1(eth_rx_ctl_1), .eth_txc_1(eth_txc_1),
+        .eth_txd_1(eth_txd_1), .eth_tx_ctl_1(eth_tx_ctl_1),
+        .eth_rst_n(eth_rst_n), .eth_mdc(eth_mdc), .eth_mdio(eth_mdio),
+        .network_link_up_sys(network_link_up)
+    );
+
     ad9226_capture u_ad9226_capture (
         .clk_adc_read_65m (clk_adc_read_65m),
         .reset             (rst_adc_read),
@@ -232,12 +322,20 @@ module Top (
         .uart_rxd                   (uart_rxd),
         .uart_txd                   (uart_txd),
         .ddr_calibrated             (ddr_calibrated_sync),
-        .network_link_up            (1'b0),
+        .network_link_up            (network_link_up),
         .adc_clock_alive            (adc_clock_alive),
         .mmcm_locked                (mmcm_locked),
         .adc_capture_done           (capture_done_adc),
         .dac_update_rate_ch1_hz     (dac_update_rate_ch1_hz),
         .dac_update_rate_ch2_hz     (dac_update_rate_ch2_hz),
+        .raw_frame_valid            (raw_frame_valid_sys),
+        .raw_frame_id               (raw_frame_id_sys),
+        .raw_frame_total_bytes      (raw_frame_total_bytes_sys),
+        .raw_upload_request         (raw_upload_request),
+        .raw_upload_frame_id        (raw_upload_frame_id),
+        .raw_upload_offset          (raw_upload_offset),
+        .raw_upload_length          (raw_upload_length),
+        .raw_upload_ready           (raw_upload_ready),
         .wave_sel_ch1               (wave_sel_ch1),
         .ftw_ch1                    (ftw_ch1),
         .amplitude_q15_ch1          (amplitude_q15_ch1),
@@ -288,11 +386,7 @@ module Top (
         .dac_code_ch1      (),
         .dac_code_ch2      (),
         .phase_ch1         (),
-        .phase_ch2         (),
-        .debug_sclk        (),
-        .debug_cs1_n       (),
-        .debug_cs2_n       (),
-        .debug_mosi        ()
+        .phase_ch2         ()
     );
 
     dac_update_rate_meter #(

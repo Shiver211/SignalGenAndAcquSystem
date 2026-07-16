@@ -19,6 +19,20 @@ module ddr3_subsystem_m6 (
     input  wire [15:0] adc_config_apply_count,
     output wire        capture_done_adc,
 
+    output wire        ddr_ui_clk,
+    output wire        ddr_ui_reset,
+    output wire        ddr_ref_clk_200m,
+
+    input  wire        raw_net_read_request_valid,
+    output wire        raw_net_read_request_ready,
+    input  wire [31:0] raw_net_read_request_start_sample,
+    input  wire [31:0] raw_net_read_request_sample_count,
+    output wire [31:0] raw_net_read_sample_data,
+    output wire        raw_net_read_sample_valid,
+    input  wire        raw_net_read_sample_ready,
+    output wire        raw_net_read_done_pulse,
+    output wire        raw_net_read_error,
+
     input  wire        dec_read_request_valid,
     output wire        dec_read_request_ready,
     input  wire [31:0] dec_read_request_start_sample,
@@ -100,6 +114,10 @@ module ddr3_subsystem_m6 (
     wire ui_clk;
     wire ui_clk_sync_rst;
     wire [11:0] device_temp;
+
+    assign ddr_ui_clk   = ui_clk;
+    assign ddr_ui_reset = ui_clk_sync_rst;
+    assign ddr_ref_clk_200m = clk_ref_200m;
 
     wire trigger_source = adc_control_config[0];
     wire [11:0] trigger_threshold = adc_control_config[12:1];
@@ -190,6 +208,16 @@ module ddr3_subsystem_m6 (
     wire raw_analysis_active;
     wire raw_analysis_error;
 
+    wire raw_reader_request_valid;
+    wire raw_reader_request_ready;
+    wire [31:0] raw_reader_request_start;
+    wire [31:0] raw_reader_request_count;
+    wire [31:0] raw_reader_sample_data;
+    wire raw_reader_sample_valid;
+    wire raw_reader_sample_ready;
+    wire raw_reader_done;
+    wire raw_reader_error;
+
     capture_storage_core_m5 #(
         .RING_SAMPLES(RAW_RING_SAMPLES),
         .RING_BASE_APP_ADDR(28'd0)
@@ -203,13 +231,14 @@ module ddr3_subsystem_m6 (
         .trigger_source(trigger_source), .trigger_threshold(trigger_threshold),
         .trigger_hysteresis(trigger_hysteresis), .trigger_falling(trigger_falling),
         .capture_depth(capture_depth), .pretrigger_permille(pretrigger_permille),
-        .read_request_valid(raw_scan_request_valid),
-        .read_request_ready(raw_scan_request_ready),
-        .read_request_start_sample(raw_scan_request_start),
-        .read_request_sample_count(raw_scan_request_count),
-        .read_sample_data(raw_scan_sample_data),
-        .read_sample_valid(raw_scan_sample_valid), .read_sample_ready(1'b1),
-        .read_done_pulse(raw_scan_read_done), .read_error(raw_scan_read_error),
+        .read_request_valid(raw_reader_request_valid),
+        .read_request_ready(raw_reader_request_ready),
+        .read_request_start_sample(raw_reader_request_start),
+        .read_request_sample_count(raw_reader_request_count),
+        .read_sample_data(raw_reader_sample_data),
+        .read_sample_valid(raw_reader_sample_valid),
+        .read_sample_ready(raw_reader_sample_ready),
+        .read_done_pulse(raw_reader_done), .read_error(raw_reader_error),
         .read_busy(raw_scan_read_busy),
         .app_addr(raw_app_addr), .app_cmd(raw_app_cmd), .app_en(raw_app_en),
         .app_rdy(raw_app_rdy), .app_wdf_data(raw_app_wdf_data),
@@ -226,6 +255,33 @@ module ddr3_subsystem_m6 (
         .frame_total_samples(frame_total_samples), .frame_trigger_index(frame_trigger_index),
         .frame_wrapped(frame_wrapped), .frame_done_ui(raw_frame_done_ui),
         .writer_state_debug(), .reader_state_debug(), .writer_sample_index_debug()
+    );
+
+    raw_read_arbiter_m7 u_raw_read_arbiter (
+        .ui_clk(ui_clk), .ui_reset(ui_clk_sync_rst),
+        .scan_request_valid(raw_scan_request_valid),
+        .scan_request_ready(raw_scan_request_ready),
+        .scan_request_start(raw_scan_request_start),
+        .scan_request_count(raw_scan_request_count),
+        .scan_sample_data(raw_scan_sample_data),
+        .scan_sample_valid(raw_scan_sample_valid), .scan_sample_ready(1'b1),
+        .scan_done(raw_scan_read_done), .scan_error(raw_scan_read_error),
+        .net_request_valid(raw_net_read_request_valid),
+        .net_request_ready(raw_net_read_request_ready),
+        .net_request_start(raw_net_read_request_start_sample),
+        .net_request_count(raw_net_read_request_sample_count),
+        .net_sample_data(raw_net_read_sample_data),
+        .net_sample_valid(raw_net_read_sample_valid),
+        .net_sample_ready(raw_net_read_sample_ready),
+        .net_done(raw_net_read_done_pulse), .net_error(raw_net_read_error),
+        .reader_request_valid(raw_reader_request_valid),
+        .reader_request_ready(raw_reader_request_ready),
+        .reader_request_start(raw_reader_request_start),
+        .reader_request_count(raw_reader_request_count),
+        .reader_sample_data(raw_reader_sample_data),
+        .reader_sample_valid(raw_reader_sample_valid),
+        .reader_sample_ready(raw_reader_sample_ready),
+        .reader_done(raw_reader_done), .reader_error(raw_reader_error)
     );
 
     frame_otr_scanner_m6 u_frame_otr_scanner (
@@ -352,4 +408,3 @@ module ddr3_subsystem_m6 (
     );
 
 endmodule
-

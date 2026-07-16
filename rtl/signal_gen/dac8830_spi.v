@@ -15,11 +15,7 @@ module dac8830_spi #(
     (* IOB = "TRUE" *) output reg dac_mosi,
 
     output reg         sample_commit_ch1,
-    output reg         sample_commit_ch2,
-    output wire        debug_sclk,
-    output wire        debug_cs1_n,
-    output wire        debug_cs2_n,
-    output wire        debug_mosi
+    output reg         sample_commit_ch2
 );
 
     localparam [2:0] ST_POWERUP = 3'd0;
@@ -41,13 +37,7 @@ module dac8830_spi #(
     reg        commit_ch1_i;
     reg        commit_ch2_i;
 
-    assign debug_sclk  = sclk_i;
-    assign debug_cs1_n = cs1_n_i;
-    assign debug_cs2_n = cs2_n_i;
-    assign debug_mosi  = mosi_i;
-
-    // 外部管脚使用独立 IOB 寄存器；ILA 观察前一级内部信号，避免调试扇出
-    // 阻止寄存器装入 OLOGIC。四个外部信号只增加相同的一个系统周期延迟。
+    // 外部管脚使用独立 IOB 寄存器。四个信号只增加相同的一个系统周期延迟。
     always @(posedge clk) begin
         if (reset) begin
             dac_sclk          <= 1'b0;

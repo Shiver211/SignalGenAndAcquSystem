@@ -276,6 +276,10 @@ M6 DDR 地址分区已固化：`0x00000000..0x0DFFFFFF` 为 224MiB RAW32，`0x0E
 
 **完成标准**：三种数据类型均可正确上传，大帧长度不受 16bit 字段限制。
 
+**实施说明（2026-07-16）**：本轮先完成 M7 RTL、Python 协议工具、行为仿真、综合、实现、DRC、CDC 和时序验证。受实机环境安排影响，千兆链路协商、Wireshark 抓包、实际吞吐/丢包及 UART 丢块重传联调后续执行，结果统一回填 `M7-development-progress.md`。
+
+**后置实机验证（待执行）**：烧录最终 `Top.bit` 后，依次验证 PHY 1Gbps 全双工协商、UART 链路状态、Wireshark ARP/IPv4/UDP/FCS/应用 CRC、超过 64KB RAW 帧重组、丢包检测与 `0x09` 指定块重传、包络最新帧策略，以及有效吞吐和丢包率。
+
 ---
 
 ## M8 — PyQt 上位机与 MySQL

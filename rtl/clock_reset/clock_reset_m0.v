@@ -17,7 +17,6 @@ module clock_reset_m0 (
     output wire phase_busy,
     output wire phase_done_toggle,
     output wire signed [15:0] phase_position,
-    output reg  [7:0] adc_heartbeat,
     output reg  [7:0] adc_read_heartbeat
 );
 
@@ -74,15 +73,7 @@ module clock_reset_m0 (
         .phase_position (phase_position)
     );
 
-    // M0 诊断计数器确保两路 65MHz 时钟保留在最终网表中，后续可由 ILA 观察。
-    always @(posedge clk_adc_65m) begin
-        if (rst_adc) begin
-            adc_heartbeat <= 8'd0;
-        end else begin
-            adc_heartbeat <= adc_heartbeat + 1'b1;
-        end
-    end
-
+    // ADC 读时钟心跳用于系统状态中的 ADC_CLOCK_ALIVE。
     always @(posedge clk_adc_read_65m) begin
         if (rst_adc_read) begin
             adc_read_heartbeat <= 8'd0;

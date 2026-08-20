@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module control_cdc #(
-    parameter integer WIDTH = 167
+    parameter integer WIDTH = 169
 ) (
     input  wire             src_clk,
     input  wire             src_reset,

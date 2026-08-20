@@ -41,8 +41,8 @@ class ControlProtocolTest(unittest.TestCase):
         channel, wave, ftw, amplitude, dc, flags = struct.unpack("<BBIHHB", generator)
         self.assertEqual((channel, wave, amplitude, dc, flags), (0, 0, 0x199A, 0x8000, 0))
         self.assertGreater(ftw, 0)
-        acquisition = acquisition_payload(0, 2048, 16, 0, 20_000, 50)
-        self.assertEqual(len(acquisition), 13)
+        acquisition = acquisition_payload(0, 2048, 16, 0, 20_000, 50, channel_mask=1)
+        self.assertEqual(len(acquisition), 14)
         processing = processing_payload(DataMode.ENVELOPE, 16, 1024, 20)
         self.assertEqual(struct.unpack("<BIIIB", processing), (1, 16, 1024, 20_000, 1))
 

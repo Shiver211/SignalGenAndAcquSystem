@@ -15,7 +15,7 @@ module ddr3_subsystem_m6 (
     input  wire        adc_otr_a,
     input  wire        adc_otr_b,
     input  wire        adc_control_armed,
-    input  wire [166:0] adc_control_config,
+    input  wire [168:0] adc_control_config,
     input  wire [15:0] adc_config_apply_count,
     output wire        capture_done_adc,
 
@@ -119,6 +119,16 @@ module ddr3_subsystem_m6 (
     assign ddr_ui_reset = ui_clk_sync_rst;
     assign ddr_ref_clk_200m = clk_ref_200m;
 
+    wire [1:0] channel_mask = adc_control_config[168:167];
+    wire capture_ch_a = channel_mask[0];
+    wire capture_ch_b = channel_mask[1];
+    // 单通道模式在 FPGA 数据入口处截断另一通道。ADC IOB 已做一次
+    // 时序安全的屏蔽，这里作为进入 RAW/处理/DDR/网络共享路径前的
+    // 最终闸门，确保任何下游模块都不会继续看到未选通道的真实样本。
+    wire [11:0] active_code_a = capture_ch_a ? adc_code_a : 12'd0;
+    wire [11:0] active_code_b = capture_ch_b ? adc_code_b : 12'd0;
+    wire active_otr_a = capture_ch_a ? adc_otr_a : 1'b0;
+    wire active_otr_b = capture_ch_b ? adc_otr_b : 1'b0;
     wire trigger_source = adc_control_config[0];
     wire [11:0] trigger_threshold = adc_control_config[12:1];
     wire [11:0] trigger_hysteresis = adc_control_config[24:13];
@@ -146,6 +156,7 @@ module ddr3_subsystem_m6 (
 
     wire [31:0] bucket_size;
     wire [31:0] measurement_window_samples;
+    wire [31:0] frame_interval_samples;
     wire [31:0] effective_sample_rate_hz;
     wire processing_ready;
     wire decimated_valid;
@@ -157,16 +168,19 @@ module ddr3_subsystem_m6 (
         .config_update             (processing_config_update),
         .data_mode                 (data_mode),
         .decimation                (decimation),
+        .capture_depth             (capture_depth),
         .display_points            (display_points),
         .refresh_millihz           (refresh_millihz),
         .envelope_enable           (envelope_enable),
+        .channel_mask              (channel_mask),
         .sample_valid              (adc_sample_valid),
-        .code_a                    (adc_code_a),
-        .code_b                    (adc_code_b),
-        .otr_a                     (adc_otr_a),
-        .otr_b                     (adc_otr_b),
+        .code_a                    (active_code_a),
+        .code_b                    (active_code_b),
+        .otr_a                     (active_otr_a),
+        .otr_b                     (active_otr_b),
         .bucket_size               (bucket_size),
         .measurement_window_samples(measurement_window_samples),
+        .frame_interval_samples    (frame_interval_samples),
         .effective_sample_rate_hz  (effective_sample_rate_hz),
         .processing_ready          (processing_ready),
         .envelope_valid            (envelope_valid),
@@ -195,6 +209,26 @@ module ddr3_subsystem_m6 (
     wire raw_capture_done_adc;
     wire raw_fifo_overflow;
     wire raw_frame_done_ui;
+    wire [1:0] channel_mask_ui;
+    reg  [1:0] raw_frame_channel_mask_ui;
+
+    // channel_mask 在一次采集期间保持不变。先同步到 UI 域，并在尚无
+    // 有效帧时持续锁存；最终写事务完成的同一边沿，mask 与帧元数据
+    // 一起冻结，避免组合描述符跨时钟域或晚一拍更新。
+    xpm_cdc_array_single #(
+        .DEST_SYNC_FF(2), .INIT_SYNC_FF(1), .SIM_ASSERT_CHK(0),
+        .SRC_INPUT_REG(1), .WIDTH(2)
+    ) u_channel_mask_to_ui (
+        .src_clk(clk_adc_read_65m), .src_in(channel_mask),
+        .dest_clk(ui_clk), .dest_out(channel_mask_ui)
+    );
+
+    always @(posedge ui_clk) begin
+        if (ui_clk_sync_rst)
+            raw_frame_channel_mask_ui <= 2'b11;
+        else if (!frame_valid)
+            raw_frame_channel_mask_ui <= channel_mask_ui;
+    end
 
     wire raw_scan_request_valid;
     wire raw_scan_request_ready;
@@ -226,11 +260,12 @@ module ddr3_subsystem_m6 (
         .ui_clk(ui_clk), .ui_reset(ui_clk_sync_rst),
         .init_calib_complete(ddr_calibrated),
         .control_armed(adc_control_armed && (data_mode != 2'd2)),
-        .sample_valid(adc_sample_valid), .code_a(adc_code_a), .code_b(adc_code_b),
-        .otr_a(adc_otr_a), .otr_b(adc_otr_b),
+        .sample_valid(adc_sample_valid), .code_a(active_code_a), .code_b(active_code_b),
+        .otr_a(active_otr_a), .otr_b(active_otr_b),
         .trigger_source(trigger_source), .trigger_threshold(trigger_threshold),
         .trigger_hysteresis(trigger_hysteresis), .trigger_falling(trigger_falling),
         .capture_depth(capture_depth), .pretrigger_permille(pretrigger_permille),
+        .channel_mask(channel_mask),
         .read_request_valid(raw_reader_request_valid),
         .read_request_ready(raw_reader_request_ready),
         .read_request_start_sample(raw_reader_request_start),
@@ -393,7 +428,8 @@ module ddr3_subsystem_m6 (
     frame_descriptor_m6 u_raw_descriptor (
         .data_type(8'h01), .frame_id(frame_id), .total_samples(frame_total_samples),
         .sample_rate_hz(32'd65_000_000), .trigger_index(frame_trigger_index),
-        .channel_mask(8'h03), .sample_format(8'h01),
+        .channel_mask({6'd0, raw_frame_channel_mask_ui}),
+        .sample_format((raw_frame_channel_mask_ui == 2'b11) ? 8'h01 : 8'h05),
         .flags({13'd0, raw_analysis_error, frame_analysis_valid, frame_wrapped}),
         .decimation(32'd1), .descriptor(raw_descriptor)
     );
@@ -402,7 +438,7 @@ module ddr3_subsystem_m6 (
         .data_type(8'h01), .frame_id(dec_frame_id),
         .total_samples(dec_frame_total_samples),
         .sample_rate_hz(effective_sample_rate_hz), .trigger_index(32'd0),
-        .channel_mask(8'h03), .sample_format(8'h04),
+        .channel_mask({6'd0, channel_mask}), .sample_format(8'h04),
         .flags({15'd0, dec_frame_wrapped}), .decimation(decimation),
         .descriptor(decimated_descriptor)
     );

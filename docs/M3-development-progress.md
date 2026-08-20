@@ -12,7 +12,7 @@
 - [x] 非法长度、越界参数、未知命令和忙状态均返回确定 NACK。
 - [x] 建立发生、校准、触发、采集深度、预触发、抽取和显示参数寄存器。
 - [x] 使用影子寄存器和提交标志实现双通道发生参数原子更新。
-- [x] 使用 XPM 握手把 167bit 采集配置快照一次性提交到 65MHz ADC 域。
+- [x] 使用 XPM 握手把 169bit 采集配置快照一次性提交到 65MHz ADC 域（含 CHANNEL_MASK）。
 - [x] ARM、STOP、清错使用独立脉冲 CDC。
 - [x] ADC ARM 状态和清错计数安全返回 100MHz 系统域。
 - [x] 查询版本、忙状态、错误计数、DDR/网络状态和 DAC 实测更新率。
@@ -30,7 +30,7 @@ uart_rxd
       └→ uart_frame_rx
           └→ reg_file
               ├→ 发生/校准影子寄存器 → 原子提交 → signal_gen_dual
-              ├→ 采集/处理影子寄存器 → 167bit control_cdc → ADC 域寄存器
+              ├→ 采集/处理影子寄存器 → 169bit control_cdc → ADC 域寄存器
               ├→ ARM / STOP / CLEAR → xpm_cdc_pulse
               └→ 状态/错误计数 → uart_response_tx → uart_tx → uart_txd
 ```
@@ -44,7 +44,7 @@ UART baud            = 921600
 最大命令 PAYLOAD     = 32 bytes
 发生提交组           = CH1 + CH2 + 两路校准
 采集提交组           = 触发 + 深度 + 预触发 + 处理 + 包络开关
-ADC 配置总线宽度     = 167 bits
+ADC 配置总线宽度     = 169 bits
 ```
 
 上电安全默认值：
@@ -71,7 +71,7 @@ continuous envelope  = off
 rtl/control/uart_frame_rx.v          # 命令帧同步、PAYLOAD 缓存和 CRC8
 rtl/control/uart_response_tx.v       # 应答帧串行化和 CRC8
 rtl/control/reg_file.v               # 命令校验、影子/活动寄存器、状态与错误计数
-rtl/control/control_cdc.v            # 167bit XPM 握手封装
+rtl/control/control_cdc.v            # 169bit XPM 握手封装
 rtl/control/adc_control_regs.v       # ADC 域配置、ARM 和清错状态占位寄存器
 rtl/control/control_plane.v          # UART、寄存器和 CDC 顶层
 rtl/control/dac_update_rate_meter.v  # 两路 DAC 实际提交率测量
@@ -93,7 +93,7 @@ M1/M2 验收完成后，M0/M1/M2 ILA 与 M1/M2 VIO 已全部从工程删除；�
 | CRC 标准向量 | 通过 | CRC-8/ATM(`123456789`) = `0xF4` |
 | 协议错误路径 | 通过 | CRC、非法参数、未知命令、BUSY、NO_FRAME 均返回对应状态 |
 | 发生参数原子提交 | 通过 | 两路发生与校准影子寄存器在同一 100MHz 边沿生效 |
-| ADC 配置原子 CDC | 通过 | 167bit 快照完整跨域，提交序号和目的域应用计数一致 |
+| ADC 配置原子 CDC | 通过 | 169bit 快照完整跨域，提交序号和目的域应用计数一致 |
 | ARM/STOP/CLEAR CDC | 通过 | 三种脉冲均只在 ADC 域产生一次 |
 | 综合 DRC | 通过 | 0 条违规；两路校准 DSP 使用完整输入/乘法/输出流水 |
 | Routed 时序 | 通过 | WNS=`1.801ns`、WHS=`0.086ns`、WPWS=`4.000ns`，失败端点为 0 |
@@ -103,7 +103,7 @@ M1/M2 验收完成后，M0/M1/M2 ILA 与 M1/M2 VIO 已全部从工程删除；�
 
 最终 routed DRC 和 Methodology 均为 0 条违规。
 
-全设计 CDC 共 8 条，均识别为安全 `CDC-3`：UART 输入同步、ADC 时钟心跳、167bit 握手控制、ARM/STOP/CLEAR 脉冲和 ADC ARM 状态返回。
+全设计 CDC 共 8 条，均识别为安全 `CDC-3`：UART 输入同步、ADC 时钟心跳、169bit 握手控制、ARM/STOP/CLEAR 脉冲和 ADC ARM 状态返回。
 
 删除调试核后的最终资源：
 

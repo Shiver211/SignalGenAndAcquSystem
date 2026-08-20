@@ -35,7 +35,7 @@ module reg_file #(
     output reg  [15:0]                          gain_q15_ch2,
     output reg  signed [15:0]                   offset_code_ch2,
 
-    output wire [166:0]                         adc_config_data,
+    output wire [168:0]                         adc_config_data,
     output reg                                  adc_config_send,
     input  wire                                 adc_config_busy,
     input  wire                                 adc_config_done,
@@ -55,6 +55,7 @@ module reg_file #(
     input  wire                                 raw_frame_valid,
     input  wire [31:0]                          raw_frame_id,
     input  wire [31:0]                          raw_frame_total_bytes,
+    input  wire [7:0]                           raw_frame_channel_mask,
     output reg                                  raw_upload_request,
     output reg  [31:0]                          raw_upload_frame_id,
     output reg  [31:0]                          raw_upload_offset,
@@ -94,6 +95,10 @@ module reg_file #(
     localparam [0:0] ST_IDLE     = 1'b0;
     localparam [0:0] ST_WAIT_CFG = 1'b1;
 
+    wire raw_single_channel = (raw_frame_channel_mask != 8'h03);
+    wire [31:0] raw_alignment_mask = raw_single_channel ? 32'h0000_0001 :
+                                                        32'h0000_0003;
+
     reg state;
     reg [7:0] pending_response_cmd;
 
@@ -130,6 +135,7 @@ module reg_file #(
     reg [31:0] display_points_shadow;
     reg [31:0] refresh_millihz_shadow;
     reg        envelope_enable_shadow;
+    reg [1:0]  channel_mask_shadow;
 
     reg        trigger_source_active;
     reg [11:0] trigger_threshold_active;
@@ -142,6 +148,7 @@ module reg_file #(
     reg [31:0] display_points_active;
     reg [31:0] refresh_millihz_active;
     reg        envelope_enable_active;
+    reg [1:0]  channel_mask_active;
 
     wire [7:0] payload_0  = command_payload[0  * 8 +: 8];
     wire [7:0] payload_1  = command_payload[1  * 8 +: 8];
@@ -166,6 +173,7 @@ module reg_file #(
     wire [15:0] acquisition_hysteresis = command_payload[3 * 8 +: 16];
     wire [31:0] acquisition_depth      = command_payload[6 * 8 +: 32];
     wire [15:0] acquisition_pretrigger = command_payload[10 * 8 +: 16];
+    wire [7:0]  acquisition_channel_mask = command_payload[13 * 8 +: 8];
 
     wire [31:0] processing_decimation = command_payload[1 * 8 +: 32];
     wire [31:0] processing_points     = command_payload[5 * 8 +: 32];
@@ -188,6 +196,7 @@ module reg_file #(
     assign command_ready = (state == ST_IDLE) && !response_valid;
 
     assign adc_config_data = {
+        channel_mask_active,
         envelope_enable_active,
         refresh_millihz_active,
         display_points_active,
@@ -268,6 +277,7 @@ module reg_file #(
             display_points_shadow      <= 32'd1_024;
             refresh_millihz_shadow     <= 32'd20_000;
             envelope_enable_shadow     <= 1'b0;
+            channel_mask_shadow        <= 2'b11;
 
             trigger_source_active      <= 1'b0;
             trigger_threshold_active   <= 12'h800;
@@ -280,6 +290,7 @@ module reg_file #(
             display_points_active      <= 32'd1_024;
             refresh_millihz_active     <= 32'd20_000;
             envelope_enable_active     <= 1'b0;
+            channel_mask_active        <= 2'b11;
 
             adc_config_send       <= 1'b0;
             arm_pulse             <= 1'b0;
@@ -378,7 +389,7 @@ module reg_file #(
                                 end
 
                                 CMD_SET_ACQUISITION: begin
-                                    if ((command_len != 8'd13) ||
+                                    if ((command_len != 8'd14) ||
                                         (payload_0 > 8'd1) ||
                                         (acquisition_threshold[15:12] != 4'd0) ||
                                         (acquisition_hysteresis[15:12] != 4'd0) ||
@@ -388,10 +399,14 @@ module reg_file #(
                                         ((data_mode_shadow == 2'd2) &&
                                          (acquisition_depth > DEC_MAX_SAMPLES)) ||
                                         (acquisition_pretrigger > 16'd1000) ||
+                                        ((acquisition_channel_mask != 8'd1) &&
+                                         (acquisition_channel_mask != 8'd2) &&
+                                         (acquisition_channel_mask != 8'd3)) ||
                                         ((payload_12 & 8'hFE) != 8'd0)) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else if (payload_12[0] && adc_config_busy) begin
+                                    end else if (payload_12[0] &&
+                                                 (adc_config_busy || adc_armed_status)) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin
@@ -401,6 +416,7 @@ module reg_file #(
                                         trigger_edge_shadow        <= payload_5[0];
                                         capture_depth_shadow       <= acquisition_depth;
                                         pretrigger_permille_shadow <= acquisition_pretrigger[9:0];
+                                        channel_mask_shadow        <= acquisition_channel_mask[1:0];
 
                                         if (payload_12[0]) begin
                                             trigger_source_active      <= payload_0[0];
@@ -414,6 +430,7 @@ module reg_file #(
                                             display_points_active      <= display_points_shadow;
                                             refresh_millihz_active     <= refresh_millihz_shadow;
                                             envelope_enable_active     <= envelope_enable_shadow;
+                                            channel_mask_active        <= acquisition_channel_mask[1:0];
                                             adc_config_send            <= 1'b1;
                                             pending_response_cmd       <= command_cmd;
                                             state                      <= ST_WAIT_CFG;
@@ -434,7 +451,8 @@ module reg_file #(
                                         ((payload_13 & 8'hFE) != 8'd0)) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else if (payload_13[0] && adc_config_busy) begin
+                                    end else if (payload_13[0] &&
+                                                 (adc_config_busy || adc_armed_status)) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin
@@ -455,6 +473,7 @@ module reg_file #(
                                             display_points_active      <= processing_points;
                                             refresh_millihz_active     <= processing_refresh;
                                             envelope_enable_active     <= envelope_enable_shadow;
+                                            channel_mask_active        <= channel_mask_shadow;
                                             adc_config_send            <= 1'b1;
                                             pending_response_cmd       <= command_cmd;
                                             state                      <= ST_WAIT_CFG;
@@ -559,9 +578,9 @@ module reg_file #(
                                                  (command_payload[0 +: 32] != raw_frame_id)) begin
                                         queue_empty_response(command_cmd, STATUS_NO_FRAME);
                                         last_error <= STATUS_NO_FRAME;
-                                    end else if ((command_payload[4 * 8 +: 32] & 32'h3) != 0 ||
+                                    end else if ((command_payload[4 * 8 +: 32] & raw_alignment_mask) != 0 ||
                                                  (command_payload[8 * 8 +: 16] == 16'd0) ||
-                                                 ((command_payload[8 * 8 +: 16] & 16'h3) != 0) ||
+                                                 ((command_payload[8 * 8 +: 16] & raw_alignment_mask[15:0]) != 0) ||
                                                  ({16'd0, command_payload[8 * 8 +: 16]} > 32'd1400) ||
                                                  (command_payload[4 * 8 +: 32] >= raw_frame_total_bytes) ||
                                                  ({16'd0, command_payload[8 * 8 +: 16]} >

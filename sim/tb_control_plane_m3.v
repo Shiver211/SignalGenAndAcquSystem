@@ -25,7 +25,7 @@ module tb_control_plane_m3;
     wire [15:0] dc_code_ch2;
     wire [15:0] gain_q15_ch2;
     wire signed [15:0] offset_code_ch2;
-    wire [166:0] adc_config_active;
+    wire [168:0] adc_config_active;
     wire [15:0] adc_config_apply_count;
     wire [15:0] adc_clear_count;
     wire adc_control_armed;
@@ -44,7 +44,7 @@ module tb_control_plane_m3;
     reg [7:0] observed_len;
     reg [7:0] observed_crc;
     reg [7:0] observed_byte;
-    reg [166:0] expected_adc_config;
+    reg [168:0] expected_adc_config;
     integer failures;
     integer index;
 
@@ -69,6 +69,7 @@ module tb_control_plane_m3;
         .raw_frame_valid            (1'b0),
         .raw_frame_id               (32'd0),
         .raw_frame_total_bytes      (32'd0),
+        .raw_frame_channel_mask     (8'h03),
         .raw_upload_request         (),
         .raw_upload_frame_id        (),
         .raw_upload_offset          (),
@@ -353,7 +354,8 @@ module tb_control_plane_m3;
         request_payload[6  * 8 +: 32] = 32'd200_000;
         request_payload[10 * 8 +: 16] = 16'd250;
         request_payload[12 * 8 +: 8]  = 8'd0;
-        send_request(8'h02, 8'd13, request_payload, 1'b0);
+        request_payload[13 * 8 +: 8]  = 8'd3;
+        send_request(8'h02, 8'd14, request_payload, 1'b0);
         expect_response(8'h02, 8'h00);
 
         if (adc_config_apply_count !== 16'd0) begin
@@ -374,6 +376,7 @@ module tb_control_plane_m3;
         expect_response(8'h03, 8'h00);
 
         expected_adc_config = {
+            2'b11,
             1'b0,
             32'd25_000,
             32'd2_048,
@@ -393,7 +396,7 @@ module tb_control_plane_m3;
             $display("[FAIL] atomic ADC config CDC mismatch");
             failures = failures + 1;
         end else begin
-            $display("[PASS] atomic 167-bit ADC config CDC");
+            $display("[PASS] atomic 169-bit ADC config CDC");
         end
 
         clear_request_payload();

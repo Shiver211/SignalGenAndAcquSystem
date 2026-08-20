@@ -8,7 +8,8 @@ import numpy as np
 
 from host.comm.data_protocol import (
     DatagramError, DataType, PacketHeader, SampleFormat, build_packet,
-    decode_envelope64, decode_measurement_v1, decode_raw32, parse_packet,
+    decode_envelope64, decode_measurement_v1, decode_raw32, expected_payload_bytes,
+    parse_packet,
 )
 from host.config import UDP_PORT
 
@@ -52,6 +53,21 @@ class DataProtocolTest(unittest.TestCase):
         decoded = decode_envelope64(envelope)
         self.assertEqual(decoded["max_a"].tolist(), [4095])
         self.assertEqual(decoded["min_b"].tolist(), [2])
+
+    def test_single_channel_payload_decode(self) -> None:
+        raw_payload = np.array([0x1ABC, 0x1001], dtype="<u2").tobytes()
+        raw = decode_raw32(raw_payload, channel_mask=2)
+        self.assertEqual(raw["a"].tolist(), [0, 0])
+        self.assertEqual(raw["b"].tolist(), [0xABC, 1])
+        envelope = struct.pack("<HH", 10, 4000)
+        decoded = decode_envelope64(envelope, channel_mask=1)
+        self.assertEqual(decoded["min_a"].tolist(), [10])
+        self.assertEqual(decoded["max_a"].tolist(), [4000])
+        self.assertEqual(decoded["min_b"].tolist(), [0])
+        self.assertEqual(expected_payload_bytes(header(SampleFormat.RAW32, 2)), 8)
+        single = PacketHeader(1, DataType.RAW_FRAME, 7, 2, 65_000_000, 0, 1,
+                              SampleFormat.RAW16, 0, 0, 4, 0)
+        self.assertEqual(expected_payload_bytes(single), 4)
 
     def test_measurement_decode(self) -> None:
         payload = struct.pack(

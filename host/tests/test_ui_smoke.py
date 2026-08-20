@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -12,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
+from host.comm.control_protocol import Command
 from host.config import PC_IP, UART_BAUD, UDP_PORT
 from host.ui.main_window import MainWindow
 
@@ -79,7 +81,7 @@ class UiSmokeTest(unittest.TestCase):
             window = MainWindow(Path(directory) / "replay.db")
             payload = b"\x01\x00\x02\x00\x03\x00\x04\x00"
             live_frame = CompletedFrame(
-                PacketHeader(1, 2, 9, 1, 1000, 0, 3,
+                PacketHeader(1, 2, 9, 1, 100, 0, 3,
                              SampleFormat.ENVELOPE64, 0, 0, len(payload), 3),
                 payload,
             )
@@ -90,6 +92,71 @@ class UiSmokeTest(unittest.TestCase):
             window.current_frame = None
             window._replay_selected()
             self.assertEqual(window.current_frame.payload, payload)
+            window.close()
+            self.app.processEvents()
+
+    def test_channel_and_time_div_are_sent_to_fpga(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "scope.db")
+            window.channel_mode_combo.setCurrentText("CH2")
+            window.timebase_combo.setCurrentText("2 ms/div")
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._apply_acquisition()
+            acquisition = send.call_args_list[0].args
+            self.assertEqual(acquisition[0], Command.SET_ACQUISITION)
+            fields = struct.unpack("<BHHBIHBB", acquisition[1])
+            self.assertEqual(fields[-1], 0x02)
+            self.assertEqual(fields[4], 1_300_000)  # 65Msps × 10格 × 2ms/div
+            self.assertAlmostEqual(window.refresh_spin.value(), 20.0)
+            # 20 Hz 刷新时，包率预算将长时基限制为 500 点/帧。
+            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertFalse(window.ch1_vdiv_combo.isEnabled())
+            self.assertTrue(window.ch2_vdiv_combo.isEnabled())
+            self.assertEqual(window.trigger_source.currentIndex(), 1)
+            window.close()
+            self.app.processEvents()
+
+    def test_timebase_commit_restores_envelope_points_after_short_timebase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "points.db")
+            window.display_points_spin.setValue(100)
+            window.timebase_combo.setCurrentText("1 ms/div")
+            with mock.patch.object(window.serial_link, "send_command"):
+                window._apply_acquisition()
+            self.assertEqual(window.display_points_spin.value(), 500)
+            window.close()
+            self.app.processEvents()
+
+    def test_uart_connection_syncs_scope_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "connect-sync.db")
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._on_uart_connection(True, "COM14")
+                window._sync_scope_configuration()
+            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertTrue(window._continuous_running)
+            self.assertTrue(any(call.args[0] == Command.ENVELOPE_ENABLE
+                                 for call in send.call_args_list))
+            window.close()
+            self.app.processEvents()
+
+    def test_timebase_change_discards_udp_backlog_and_redraws_current_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "flush.db")
+            payload = struct.pack(
+                "<" + "H" * 400,
+                *([0x800, 0x900, 0x700, 0xA00] * 100),
+            )
+            envelope = CompletedFrame(
+                PacketHeader(1, 2, 9, 100, 10000, 0, 3,
+                             SampleFormat.ENVELOPE64, 0, 0, len(payload), 3),
+                payload,
+            )
+            window._on_frame(envelope)
+            with mock.patch.object(window.udp_receiver, "discard_pending") as flush:
+                window.timebase_combo.setCurrentText("2 ms/div")
+            flush.assert_called_once_with()
+            self.assertIs(window.current_frame, envelope)
             window.close()
             self.app.processEvents()
 

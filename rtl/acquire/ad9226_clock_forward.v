@@ -37,4 +37,3 @@ module ad9226_clock_forward (
     );
 
 endmodule
-

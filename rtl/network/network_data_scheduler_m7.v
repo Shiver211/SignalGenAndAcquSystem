@@ -17,6 +17,7 @@ module network_data_scheduler_m7 (
     output wire [31:0]  raw_bridge_frame_start_sample,
     output wire [31:0]  raw_bridge_byte_offset,
     output wire [31:0]  raw_bridge_byte_count,
+    output wire         raw_bridge_single_channel,
     input  wire [31:0]  raw_word,
     input  wire         raw_word_valid,
     output wire         raw_word_ready,
@@ -65,11 +66,16 @@ module network_data_scheduler_m7 (
     reg raw_bridge_requested;
     reg app_requested;
     reg [1:0] raw_byte_index;
+    wire raw_single_channel = (raw_descriptor_latched[151:144] != 8'h03);
+    wire [2:0] raw_bytes_per_sample = raw_single_channel ? 3'd2 : 3'd4;
 
     reg [207:0] env_descriptor_latched;
     reg [31:0] env_point_index_latched;
     reg [63:0] env_data_latched;
     reg [3:0] env_byte_index;
+    wire env_single_channel = (env_descriptor_latched[151:144] != 8'h03);
+    wire [3:0] env_last_byte = env_single_channel ? 4'd3 : 4'd7;
+    wire [31:0] env_bytes_per_point = env_single_channel ? 32'd4 : 32'd8;
 
     reg [207:0] meas_descriptor_latched;
     reg [367:0] meas_data_latched;
@@ -109,6 +115,7 @@ module network_data_scheduler_m7 (
     assign raw_bridge_frame_start_sample = raw_frame_start_latched;
     assign raw_bridge_byte_offset = raw_offset_current;
     assign raw_bridge_byte_count  = raw_chunk_length;
+    assign raw_bridge_single_channel = raw_single_channel;
 
     assign app_request_valid = ((state == S_RAW_PREPARE) && !app_requested) ||
                                (state == S_ENV_PREPARE) ||
@@ -126,7 +133,9 @@ module network_data_scheduler_m7 (
     assign app_chunk_offset = ((state == S_RAW_PREPARE) ||
                                (state == S_RAW_PAYLOAD)) ? raw_offset_current :
                               ((state == S_ENV_PREPARE) ||
-                               (state == S_ENV_PAYLOAD)) ? (env_point_index_latched << 3) :
+                               (state == S_ENV_PAYLOAD)) ?
+                                   (env_point_index_latched *
+                                    env_bytes_per_point) :
                                                            32'd0;
     assign app_flags = ((state == S_RAW_PREPARE) ||
                         (state == S_RAW_PAYLOAD)) ?
@@ -136,25 +145,35 @@ module network_data_scheduler_m7 (
     assign app_payload_length = ((state == S_RAW_PREPARE) ||
                                  (state == S_RAW_PAYLOAD)) ? raw_chunk_length :
                                 ((state == S_ENV_PREPARE) ||
-                                 (state == S_ENV_PAYLOAD)) ? 11'd8 : 11'd46;
+                                 (state == S_ENV_PAYLOAD)) ?
+                                  (env_single_channel ? 11'd4 : 11'd8) : 11'd46;
 
     assign app_payload_valid = (state == S_RAW_PAYLOAD) ? raw_word_valid :
                                (state == S_ENV_PAYLOAD) ? 1'b1 :
                                (state == S_MEAS_PAYLOAD) ? 1'b1 : 1'b0;
     assign raw_word_ready = (state == S_RAW_PAYLOAD) && app_payload_ready &&
-                            (raw_byte_index == 2'd3);
+                            (raw_byte_index == (raw_single_channel ? 2'd1 : 2'd3));
 
     always @(*) begin
         app_payload_data = 8'd0;
         if (state == S_RAW_PAYLOAD) begin
-            case (raw_byte_index)
-                2'd0: app_payload_data = raw_word[7:0];
-                2'd1: app_payload_data = raw_word[15:8];
-                2'd2: app_payload_data = raw_word[23:16];
-                default: app_payload_data = raw_word[31:24];
-            endcase
+            if (raw_single_channel) begin
+                app_payload_data = raw_byte_index[0] ? raw_word[15:8] : raw_word[7:0];
+            end else begin
+                case (raw_byte_index)
+                    2'd0: app_payload_data = raw_word[7:0];
+                    2'd1: app_payload_data = raw_word[15:8];
+                    2'd2: app_payload_data = raw_word[23:16];
+                    default: app_payload_data = raw_word[31:24];
+                endcase
+            end
         end else if (state == S_ENV_PAYLOAD) begin
-            app_payload_data = env_data_latched[env_byte_index * 8 +: 8];
+            if (env_single_channel)
+                app_payload_data = env_data_latched[
+                    (env_descriptor_latched[151:144] == 8'h01 ? 0 : 32) +
+                    env_byte_index * 8 +: 8];
+            else
+                app_payload_data = env_data_latched[env_byte_index * 8 +: 8];
         end else if (state == S_MEAS_PAYLOAD) begin
             app_payload_data = meas_data_latched[meas_byte_index * 8 +: 8];
         end
@@ -239,9 +258,9 @@ module network_data_scheduler_m7 (
 
                 S_RAW_PAYLOAD: begin
                     if (app_payload_valid && app_payload_ready) begin
-                        if (raw_byte_index == 2'd3) begin
+                        if (raw_byte_index == (raw_single_channel ? 2'd1 : 2'd3)) begin
                             raw_byte_index <= 2'd0;
-                            if (raw_payload_bytes_left == 11'd4) begin
+                            if (raw_payload_bytes_left == raw_bytes_per_sample) begin
                                 if (raw_bytes_remaining <= 32'd1400) begin
                                     raw_bytes_remaining <= 32'd0;
                                     state               <= S_IDLE;
@@ -262,7 +281,7 @@ module network_data_scheduler_m7 (
                                     state                <= S_IDLE;
                                 end
                             end else begin
-                                raw_payload_bytes_left <= raw_payload_bytes_left - 4;
+                                raw_payload_bytes_left <= raw_payload_bytes_left - raw_bytes_per_sample;
                             end
                         end else begin
                             raw_byte_index <= raw_byte_index + 1'b1;
@@ -277,7 +296,7 @@ module network_data_scheduler_m7 (
 
                 S_ENV_PAYLOAD: begin
                     if (app_payload_ready) begin
-                        if (env_byte_index == 4'd7)
+                        if (env_byte_index == env_last_byte)
                             state <= S_IDLE;
                         else
                             env_byte_index <= env_byte_index + 1'b1;

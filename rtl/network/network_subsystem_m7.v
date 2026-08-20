@@ -12,6 +12,7 @@ module network_subsystem_m7 #(
     input  wire         reset_sys,
     input  wire         clk_adc_65m,
     input  wire         reset_adc,
+    input  wire [15:0]  config_apply_count_adc,
     input  wire         clk_ref_200m,
     input  wire         ui_clk,
     input  wire         ui_reset,
@@ -208,6 +209,7 @@ module network_subsystem_m7 #(
     );
 
     reg [3:0] envelope_flush_count;
+    reg [15:0] envelope_config_apply_seen;
     wire envelope_fifo_reset = reset_adc ||
                                (envelope_flush_count != 4'd0);
     wire [303:0] envelope_fifo_data;
@@ -233,6 +235,12 @@ module network_subsystem_m7 #(
     always @(posedge clk_adc_65m) begin
         if (reset_adc) begin
             envelope_flush_count <= 4'd0;
+            envelope_config_apply_seen <= config_apply_count_adc;
+        end else if (config_apply_count_adc != envelope_config_apply_seen) begin
+            // 配置切换（尤其是 channel_mask）后立即丢弃旧包络积压，避免
+            // 已关闭通道继续从网络 FIFO 发送数秒。
+            envelope_config_apply_seen <= config_apply_count_adc;
+            envelope_flush_count <= 4'd8;
         end else if (envelope_fifo_full && envelope_valid_adc) begin
             envelope_flush_count <= 4'd8;
         end else if (envelope_flush_count != 4'd0) begin
@@ -276,6 +284,7 @@ module network_subsystem_m7 #(
     wire [31:0] raw_bridge_frame_start;
     wire [31:0] raw_bridge_offset;
     wire [31:0] raw_bridge_count;
+    wire raw_bridge_single_channel;
     wire [31:0] raw_word;
     wire raw_word_valid;
     wire raw_word_ready;
@@ -288,6 +297,7 @@ module network_subsystem_m7 #(
         .request_ready(raw_bridge_request_ready),
         .frame_start_sample(raw_bridge_frame_start),
         .byte_offset(raw_bridge_offset), .byte_count(raw_bridge_count),
+        .single_channel(raw_bridge_single_channel),
         .active(raw_bridge_active), .done_pulse(raw_bridge_done),
         .raw_word(raw_word), .raw_word_valid(raw_word_valid),
         .raw_word_ready(raw_word_ready),
@@ -327,6 +337,7 @@ module network_subsystem_m7 #(
         .raw_bridge_frame_start_sample(raw_bridge_frame_start),
         .raw_bridge_byte_offset(raw_bridge_offset),
         .raw_bridge_byte_count(raw_bridge_count),
+        .raw_bridge_single_channel(raw_bridge_single_channel),
         .raw_word(raw_word), .raw_word_valid(raw_word_valid),
         .raw_word_ready(raw_word_ready),
         .envelope_valid(envelope_network_ready && !envelope_fifo_empty),

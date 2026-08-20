@@ -58,7 +58,16 @@ if (-not (Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction Silent
         -LocalAddress $Address `
         -LocalPort $UdpPort `
         -RemoteAddress $FpgaAddress `
-        -Profile Private | Out-Null
+        -Profile Any | Out-Null
+} else {
+    # Windows 会把 FPGA 直连链路归类为 Public；下面的地址和端口过滤
+    # 仍将规则严格限制在 FPGA 数据链路上。
+    Set-NetFirewallRule -DisplayName $FirewallRuleName -Enabled True -Direction Inbound -Action Allow -Profile Any | Out-Null
+    $rule = Get-NetFirewallRule -DisplayName $FirewallRuleName
+    $addressFilter = $rule | Get-NetFirewallAddressFilter
+    Set-NetFirewallAddressFilter -InputObject $addressFilter -LocalAddress $Address -RemoteAddress $FpgaAddress | Out-Null
+    $portFilter = $rule | Get-NetFirewallPortFilter
+    Set-NetFirewallPortFilter -InputObject $portFilter -Protocol UDP -LocalPort $UdpPort -RemotePort Any | Out-Null
 }
 
 "SETUP_NETWORK_OK" | Set-Content -Path $ErrorLog -Encoding UTF8

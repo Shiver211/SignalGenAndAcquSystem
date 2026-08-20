@@ -26,6 +26,8 @@ class SampleFormat(IntEnum):
     ENVELOPE64 = 0x02
     MEASUREMENT_V1 = 0x03
     DECIMATED32 = 0x04
+    RAW16 = 0x05
+    ENVELOPE32 = 0x06
 
 
 class DatagramError(ValueError):
@@ -115,14 +117,31 @@ def build_packet(header: PacketHeader, payload: bytes) -> bytes:
 def expected_payload_bytes(header: PacketHeader) -> int:
     if header.sample_format in (SampleFormat.RAW32, SampleFormat.DECIMATED32):
         return header.total_samples * 4
+    if header.sample_format == SampleFormat.RAW16:
+        return header.total_samples * 2
     if header.sample_format == SampleFormat.ENVELOPE64:
         return header.total_samples * 8
+    if header.sample_format == SampleFormat.ENVELOPE32:
+        return header.total_samples * 4
     if header.sample_format == SampleFormat.MEASUREMENT_V1:
         return 46
     return header.payload_len
 
 
-def decode_raw32(payload: bytes) -> dict[str, np.ndarray]:
+def decode_raw32(payload: bytes, channel_mask: int = 0x03) -> dict[str, np.ndarray]:
+    if channel_mask in (1, 2):
+        if len(payload) % 2:
+            raise ValueError("单通道 RAW 数据长度必须为 2 的倍数")
+        samples = np.frombuffer(payload, dtype="<u2")
+        code = (samples & 0xFFF).astype(np.uint16)
+        empty = np.zeros(code.shape, dtype=np.uint16)
+        empty_otr = np.zeros(code.shape, dtype=bool)
+        return {
+            "a": code if channel_mask == 1 else empty,
+            "b": code if channel_mask == 2 else empty,
+            "otr_a": ((samples >> 12) & 1).astype(bool) if channel_mask == 1 else empty_otr,
+            "otr_b": ((samples >> 12) & 1).astype(bool) if channel_mask == 2 else empty_otr,
+        }
     if len(payload) % 4:
         raise ValueError("RAW32 数据长度必须为 4 的倍数")
     words = np.frombuffer(payload, dtype="<u4")
@@ -134,7 +153,20 @@ def decode_raw32(payload: bytes) -> dict[str, np.ndarray]:
     }
 
 
-def decode_envelope64(payload: bytes) -> dict[str, np.ndarray]:
+def decode_envelope64(payload: bytes, channel_mask: int = 0x03) -> dict[str, np.ndarray]:
+    if channel_mask in (1, 2):
+        if len(payload) % 4:
+            raise ValueError("单通道包络数据长度必须为 4 的倍数")
+        values = np.frombuffer(payload, dtype="<u2").reshape(-1, 2)
+        minimum = values[:, 0] & 0xFFF
+        maximum = values[:, 1] & 0xFFF
+        empty = np.zeros(minimum.shape, dtype=np.uint16)
+        return {
+            "min_a": minimum if channel_mask == 1 else empty,
+            "max_a": maximum if channel_mask == 1 else empty,
+            "min_b": minimum if channel_mask == 2 else empty,
+            "max_b": maximum if channel_mask == 2 else empty,
+        }
     if len(payload) % 8:
         raise ValueError("ENVELOPE64 数据长度必须为 8 的倍数")
     values = np.frombuffer(payload, dtype="<u2").reshape(-1, 4)

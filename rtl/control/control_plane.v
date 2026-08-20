@@ -23,6 +23,7 @@ module control_plane #(
     input  wire         raw_frame_valid,
     input  wire [31:0]  raw_frame_id,
     input  wire [31:0]  raw_frame_total_bytes,
+    input  wire [7:0]   raw_frame_channel_mask,
     output wire         raw_upload_request,
     output wire [31:0]  raw_upload_frame_id,
     output wire [31:0]  raw_upload_offset,
@@ -42,7 +43,7 @@ module control_plane #(
     output wire [15:0]  gain_q15_ch2,
     output wire signed [15:0] offset_code_ch2,
 
-    output wire [166:0] adc_config_active,
+    output wire [168:0] adc_config_active,
     output wire [15:0]  adc_config_apply_count,
     output wire [15:0]  adc_clear_count,
     output wire         adc_control_armed,
@@ -78,11 +79,11 @@ module control_plane #(
     wire [7:0] response_len;
     wire [MAX_PAYLOAD_BYTES * 8 - 1:0] response_payload;
 
-    wire [166:0] adc_config_source;
+    wire [168:0] adc_config_source;
     wire         adc_config_send;
     wire         adc_config_busy;
     wire         adc_config_done;
-    wire [166:0] adc_config_cdc_data;
+    wire [168:0] adc_config_cdc_data;
     wire         adc_config_cdc_update;
 
     wire arm_pulse_sys;
@@ -177,6 +178,7 @@ module control_plane #(
         .raw_frame_valid           (raw_frame_valid),
         .raw_frame_id              (raw_frame_id),
         .raw_frame_total_bytes     (raw_frame_total_bytes),
+        .raw_frame_channel_mask    (raw_frame_channel_mask),
         .raw_upload_request        (raw_upload_request),
         .raw_upload_frame_id       (raw_upload_frame_id),
         .raw_upload_offset         (raw_upload_offset),
@@ -220,7 +222,7 @@ module control_plane #(
     );
 
     control_cdc #(
-        .WIDTH (167)
+        .WIDTH (169)
     ) u_control_cdc (
         .src_clk     (clk_sys),
         .src_reset   (reset_sys),
@@ -280,7 +282,7 @@ module control_plane #(
     );
 
     adc_control_regs #(
-        .CONFIG_WIDTH (167)
+        .CONFIG_WIDTH (169)
     ) u_adc_control_regs (
         .clk                (clk_adc),
         .reset              (reset_adc),

@@ -436,14 +436,15 @@ OFFSET  SIZE  FIELD
 8       2     DC_CODE，FTW=0 时输出
 10      1     FLAGS
 
-CMD 0x02，LEN=13，设置采集参数
+CMD 0x02，LEN=14，设置采集参数
 0       1     TRIGGER_SOURCE：0=A，1=B
 1       2     THRESHOLD_CODE：0..4095
 3       2     HYSTERESIS_CODE：0..4095
 5       1     EDGE：0=上升沿，1=下降沿
-6       4     CAPTURE_DEPTH：1..67108864 个双通道样本组
+6       4     CAPTURE_DEPTH：1..58720256 个采样时刻
 10      2     PRETRIGGER_PERMILLE：0..1000
-12      1     FLAGS
+12      1     COMMIT：0=仅暂存，1=提交
+13      1     CHANNEL_MASK：1=CH1，2=CH2，3=双通道
 
 CMD 0x03，LEN=14，设置处理参数
 0       1     DATA_MODE：0=RAW，1=ENVELOPE，2=DECIMATED
@@ -464,7 +465,7 @@ CMD 0x0A，LEN=6，设置 DAC 校准参数
 CMD 0x04 / 0x05 / 0x07 / 0x0B，LEN=0
 ```
 
-发生参数和校准参数属于同一个提交组：可以先分别暂存两个通道，最后一条命令置 `COMMIT=1`，两个通道在同一个 100MHz 时钟边沿生效。采集参数和处理参数属于另一个提交组，提交时形成一个 167bit 快照，通过 XPM 握手一次性进入 65MHz ADC 域；FPGA 在目的域确认接收后才返回 ACK。
+发生参数和校准参数属于同一个提交组：可以先分别暂存两个通道，最后一条命令置 `COMMIT=1`，两个通道在同一个 100MHz 时钟边沿生效。采集参数和处理参数属于另一个提交组，提交时形成一个 169bit 快照，通过 XPM 握手一次性进入 65MHz ADC 域；FPGA 在目的域确认接收后才返回 ACK。`CHANNEL_MASK` 为单通道时，FPGA 在输入 IOB 后立即丢弃另一通道，后续处理、DDR 和网络链路均不再采集或传输该路；RAW 使用 RAW16（2 字节/点），包络使用 ENVELOPE32（4 字节/点）。两路 ADC 转发时钟保持连续，避免异步停钟破坏输入时序。
 
 M3 顶层 UART 波特率为 `921600`。上电默认两路 DAC 均为 `FTW=0、DC_CODE=0x8000、GAIN_Q15=0x8000、OFFSET_CODE=0`。
 

@@ -159,6 +159,7 @@ class UdpReceiver(QtCore.QObject):
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._stop = threading.Event()
+        self._flush = threading.Event()
         self._thread: threading.Thread | None = None
         self._bind = "0.0.0.0"
         self._port = UDP_PORT
@@ -172,6 +173,7 @@ class UdpReceiver(QtCore.QObject):
         self.stop()
         self._bind, self._port = bind, port
         self._stop.clear()
+        self._flush.clear()
         self.reassembler = FrameReassembler()
         self._thread = threading.Thread(target=self._worker, name="udp-receiver", daemon=True)
         self._thread.start()
@@ -182,9 +184,16 @@ class UdpReceiver(QtCore.QObject):
             self._thread.join(timeout=1.5)
         self._thread = None
 
+    def discard_pending(self) -> None:
+        """丢弃时基切换前已经排队的 UDP 数据。"""
+        self._flush.set()
+        if not self.running:
+            self.reassembler = FrameReassembler()
+
     def _worker(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
+        # 实时示波器宁可丢弃过期帧，也不能缓存数秒的历史波形。
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
         sock.settimeout(0.05)
         try:
             sock.bind((self._bind, self._port))
@@ -196,6 +205,10 @@ class UdpReceiver(QtCore.QObject):
         last_stats = time.monotonic()
         try:
             while not self._stop.is_set():
+                if self._flush.is_set():
+                    self._discard_socket_backlog(sock)
+                    self.reassembler = FrameReassembler()
+                    self._flush.clear()
                 try:
                     datagram, _ = sock.recvfrom(2048)
                     frame = self.reassembler.ingest(datagram)
@@ -220,3 +233,17 @@ class UdpReceiver(QtCore.QObject):
         finally:
             sock.close()
             self.running_changed.emit(False, f"{self._bind}:{self._port}")
+
+    @staticmethod
+    def _discard_socket_backlog(sock: socket.socket) -> None:
+        """在接收线程中非阻塞清空当前 socket 的待处理报文。"""
+        previous_timeout = sock.gettimeout()
+        sock.setblocking(False)
+        try:
+            for _ in range(16_384):
+                try:
+                    sock.recvfrom(2048)
+                except BlockingIOError:
+                    break
+        finally:
+            sock.settimeout(previous_timeout)

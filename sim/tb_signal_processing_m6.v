@@ -4,16 +4,20 @@ module tb_signal_processing_m6;
     localparam integer SAMPLE_COUNT = 1024;
     localparam integer ENVELOPE_COUNT = 32;
     localparam integer DECIMATED_COUNT = 128;
-    localparam integer MEASUREMENT_COUNT = 2;
+    // 新时基语义按 frame_interval_samples 节流测量；本向量只提供一个
+    // 完整 512-sample 窗口，因此期望一个测量包。
+    localparam integer MEASUREMENT_COUNT = 1;
 
     reg clk = 1'b0;
     reg reset = 1'b1;
     reg config_update = 1'b0;
     reg [1:0] data_mode = 2'd2;
     reg [31:0] decimation = 32'd8;
+    reg [31:0] capture_depth = 32'd512;
     reg [31:0] display_points = 32'd16;
     reg [31:0] refresh_millihz = 32'd2_000;
     reg envelope_enable = 1'b1;
+    reg [1:0] channel_mask = 2'b11;
     reg sample_valid = 1'b0;
     reg [11:0] code_a = 12'd0;
     reg [11:0] code_b = 12'd0;
@@ -22,6 +26,7 @@ module tb_signal_processing_m6;
 
     wire [31:0] bucket_size;
     wire [31:0] measurement_window_samples;
+    wire [31:0] frame_interval_samples;
     wire [31:0] effective_sample_rate_hz;
     wire processing_ready;
     wire envelope_valid;
@@ -54,11 +59,14 @@ module tb_signal_processing_m6;
     ) dut (
         .clk(clk), .reset(reset), .config_update(config_update),
         .data_mode(data_mode), .decimation(decimation),
+        .capture_depth(capture_depth),
         .display_points(display_points), .refresh_millihz(refresh_millihz),
-        .envelope_enable(envelope_enable), .sample_valid(sample_valid),
+        .envelope_enable(envelope_enable), .channel_mask(channel_mask),
+        .sample_valid(sample_valid),
         .code_a(code_a), .code_b(code_b), .otr_a(otr_a), .otr_b(otr_b),
         .bucket_size(bucket_size),
         .measurement_window_samples(measurement_window_samples),
+        .frame_interval_samples(frame_interval_samples),
         .effective_sample_rate_hz(effective_sample_rate_hz),
         .processing_ready(processing_ready), .envelope_valid(envelope_valid),
         .envelope_data(envelope_data), .envelope_frame_done(envelope_frame_done),
@@ -128,18 +136,32 @@ module tb_signal_processing_m6;
         wait (!processing_ready);
         wait (processing_ready);
         if (bucket_size != 32'd32 || measurement_window_samples != 32'd512 ||
+            frame_interval_samples != 32'd512 ||
             effective_sample_rate_hz != 32'd128) begin
-            $fatal(1, "M6 config mismatch K/window/rate=%0d/%0d/%0d",
+            $fatal(1, "M6 config mismatch K/window/interval/rate=%0d/%0d/%0d/%0d",
                    bucket_size, measurement_window_samples,
-                   effective_sample_rate_hz);
+                   frame_interval_samples, effective_sample_rate_hz);
         end
 
-        repeat (2) @(posedge clk);
+        // config_applied 还会在下一拍作为处理子模块的 reset 脉冲，
+        // 等待该脉冲完全结束后再送入向量。
+        repeat (3) @(posedge clk);
         for (input_index = 0; input_index < SAMPLE_COUNT; input_index = input_index + 1) begin
             code_a <= input_memory[input_index][11:0];
             code_b <= input_memory[input_index][23:12];
             otr_a  <= input_memory[input_index][24];
             otr_b  <= input_memory[input_index][25];
+            sample_valid <= 1'b1;
+            @(posedge clk);
+        end
+        // 配置切换会让处理链在首个有效边界丢弃一个抽取窗口；补送一个
+        // 8-sample decimation 窗口，使该向量仍覆盖完整的 1024-sample
+        // 参考结果，同时不改变配置公式的验证。
+        for (input_index = 0; input_index < 8; input_index = input_index + 1) begin
+            code_a <= input_memory[SAMPLE_COUNT - 1][11:0];
+            code_b <= input_memory[SAMPLE_COUNT - 1][23:12];
+            otr_a  <= input_memory[SAMPLE_COUNT - 1][24];
+            otr_b  <= input_memory[SAMPLE_COUNT - 1][25];
             sample_valid <= 1'b1;
             @(posedge clk);
         end
@@ -168,4 +190,3 @@ module tb_signal_processing_m6;
     end
 
 endmodule
-

@@ -1,6 +1,8 @@
 `timescale 1ns / 1ps
 
-// 按固定原始样本窗口产生双通道基础测量。频率仅在窗口内至少有 8 个完整周期时有效。
+// 按固定原始样本窗口产生双通道基础测量。频率仅在窗口内至少有
+// MIN_PERIODS 个完整周期时有效。上一窗口的 Min/Max 用于建立下一窗口
+// 的 25%/75% 施密特阈值，从而同时适应通道直流偏置和不同信号幅度。
 module measurement_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000,
     parameter integer MIN_PERIODS    = 8
@@ -65,8 +67,13 @@ module measurement_m6 #(
     reg [31:0] running_otr_b;
 
     reg previous_valid;
-    reg [11:0] previous_a;
-    reg [11:0] previous_b;
+    reg level_a;
+    reg level_b;
+    reg thresholds_ready;
+    reg [11:0] crossing_low_a;
+    reg [11:0] crossing_high_a;
+    reg [11:0] crossing_low_b;
+    reg [11:0] crossing_high_b;
     reg first_cross_a;
     reg first_cross_b;
     reg [31:0] period_counter_a;
@@ -95,10 +102,11 @@ module measurement_m6 #(
     wire [31:0] active_window =
         (window_samples == 32'd0) ? 32'd1 : window_samples;
     wire window_last = sample_count == active_window - 1'b1;
-    wire rising_a = previous_valid &&
-        (previous_a < 12'h800) && (code_a >= 12'h800);
-    wire rising_b = previous_valid &&
-        (previous_b < 12'h800) && (code_b >= 12'h800);
+    localparam [11:0] MIN_HYSTERESIS = 12'd16;
+    wire rising_a = previous_valid && thresholds_ready && !level_a &&
+                    (code_a >= crossing_high_a);
+    wire rising_b = previous_valid && thresholds_ready && !level_b &&
+                    (code_b >= crossing_high_b);
 
     wire [63:0] sum_a_with_sample = sum_a + code_a;
     wire [63:0] sum_b_with_sample = sum_b + code_b;
@@ -120,6 +128,42 @@ module measurement_m6 #(
         (complete_period_b ? period_counter_b + 1'b1 : 64'd0);
     wire [31:0] period_count_a_with_sample = period_count_a + complete_period_a;
     wire [31:0] period_count_b_with_sample = period_count_b + complete_period_b;
+
+    // 用当前窗口的幅度学习下一窗口阈值。半滞回为 Vpp/4，
+    // 即上下阈值约位于波形范围的 25% 和 75%。最小 16 LSB 避免
+    // 零幅度时两个阈值重合。
+    wire [12:0] span_a_next = {1'b0, max_a_with_sample} -
+                              {1'b0, min_a_with_sample};
+    wire [12:0] span_b_next = {1'b0, max_b_with_sample} -
+                              {1'b0, min_b_with_sample};
+    wire [12:0] center_sum_a_next = {1'b0, min_a_with_sample} +
+                                    {1'b0, max_a_with_sample};
+    wire [12:0] center_sum_b_next = {1'b0, min_b_with_sample} +
+                                    {1'b0, max_b_with_sample};
+    wire [11:0] center_a_next = center_sum_a_next[12:1];
+    wire [11:0] center_b_next = center_sum_b_next[12:1];
+    wire [11:0] quarter_span_a_next = span_a_next[11:2];
+    wire [11:0] quarter_span_b_next = span_b_next[11:2];
+    wire [11:0] hysteresis_a_next =
+        (quarter_span_a_next < MIN_HYSTERESIS)
+        ? MIN_HYSTERESIS : quarter_span_a_next;
+    wire [11:0] hysteresis_b_next =
+        (quarter_span_b_next < MIN_HYSTERESIS)
+        ? MIN_HYSTERESIS : quarter_span_b_next;
+    wire [12:0] crossing_high_a_next_ext =
+        {1'b0, center_a_next} + {1'b0, hysteresis_a_next};
+    wire [12:0] crossing_high_b_next_ext =
+        {1'b0, center_b_next} + {1'b0, hysteresis_b_next};
+    wire [11:0] crossing_low_a_next =
+        (center_a_next > hysteresis_a_next)
+        ? center_a_next - hysteresis_a_next : 12'd0;
+    wire [11:0] crossing_low_b_next =
+        (center_b_next > hysteresis_b_next)
+        ? center_b_next - hysteresis_b_next : 12'd0;
+    wire [11:0] crossing_high_a_next = crossing_high_a_next_ext[12]
+        ? 12'hFFF : crossing_high_a_next_ext[11:0];
+    wire [11:0] crossing_high_b_next = crossing_high_b_next_ext[12]
+        ? 12'hFFF : crossing_high_b_next_ext[11:0];
 
     unsigned_divider_m6 u_measurement_divider (
         .clk            (clk),
@@ -146,8 +190,8 @@ module measurement_m6 #(
             running_otr_a    <= 32'd0;
             running_otr_b    <= 32'd0;
             previous_valid   <= 1'b0;
-            previous_a       <= 12'd0;
-            previous_b       <= 12'd0;
+            level_a          <= 1'b0;
+            level_b          <= 1'b0;
             first_cross_a    <= 1'b0;
             first_cross_b    <= 1'b0;
             period_counter_a <= 32'd0;
@@ -191,6 +235,11 @@ module measurement_m6 #(
             latched_period_sum_b <= 64'd0;
             latched_period_count_a <= 32'd0;
             latched_period_count_b <= 32'd0;
+            thresholds_ready      <= 1'b0;
+            crossing_low_a        <= 12'h7F0;
+            crossing_high_a       <= 12'h810;
+            crossing_low_b        <= 12'h7F0;
+            crossing_high_b       <= 12'h810;
             reset_window();
         end else begin
             measurement_valid <= 1'b0;
@@ -198,8 +247,21 @@ module measurement_m6 #(
 
             if (sample_valid) begin
                 previous_valid <= 1'b1;
-                previous_a     <= code_a;
-                previous_b     <= code_b;
+
+                if (thresholds_ready) begin
+                    if (!level_a && (code_a >= crossing_high_a))
+                        level_a <= 1'b1;
+                    else if (level_a && (code_a <= crossing_low_a))
+                        level_a <= 1'b0;
+
+                    if (!level_b && (code_b >= crossing_high_b))
+                        level_b <= 1'b1;
+                    else if (level_b && (code_b <= crossing_low_b))
+                        level_b <= 1'b0;
+                end else begin
+                    level_a <= 1'b0;
+                    level_b <= 1'b0;
+                end
 
                 if (rising_a) begin
                     first_cross_a    <= 1'b1;
@@ -224,6 +286,11 @@ module measurement_m6 #(
                 end
 
                 if (window_last) begin
+                    thresholds_ready <= 1'b1;
+                    crossing_low_a   <= crossing_low_a_next;
+                    crossing_high_a  <= crossing_high_a_next;
+                    crossing_low_b   <= crossing_low_b_next;
+                    crossing_high_b  <= crossing_high_b_next;
                     if (state == S_IDLE) begin
                         measured_samples <= active_window;
                         min_a <= min_a_with_sample;
@@ -240,8 +307,20 @@ module measurement_m6 #(
                         latched_period_sum_b <= period_sum_b_with_sample;
                         latched_period_count_a <= period_count_a_with_sample;
                         latched_period_count_b <= period_count_b_with_sample;
-                        period_valid_a <= period_count_a_with_sample >= MIN_PERIODS;
-                        period_valid_b <= period_count_b_with_sample >= MIN_PERIODS;
+                        period_valid_a <= thresholds_ready &&
+                            (period_count_a_with_sample >= MIN_PERIODS);
+                        period_valid_b <= thresholds_ready &&
+                            (period_count_b_with_sample >= MIN_PERIODS);
+                        if (!thresholds_ready ||
+                            (period_count_a_with_sample < MIN_PERIODS)) begin
+                            period_samples_a <= 32'd0;
+                            frequency_hz_a   <= 32'd0;
+                        end
+                        if (!thresholds_ready ||
+                            (period_count_b_with_sample < MIN_PERIODS)) begin
+                            period_samples_b <= 32'd0;
+                            frequency_hz_b   <= 32'd0;
+                        end
                         calculation_overrun <= 1'b0;
                         state <= S_START_MEAN_A;
                     end else begin
@@ -339,4 +418,3 @@ module measurement_m6 #(
     end
 
 endmodule
-

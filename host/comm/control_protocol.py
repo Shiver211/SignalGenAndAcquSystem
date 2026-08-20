@@ -147,6 +147,7 @@ def acquisition_payload(
     capture_depth: int,
     pretrigger_percent: float,
     *,
+    channel_mask: int = 0x03,
     commit: bool = True,
 ) -> bytes:
     if source not in (0, 1) or edge not in (0, 1):
@@ -157,9 +158,11 @@ def acquisition_payload(
         raise ValueError("采集深度超出 RAW 分区容量")
     if not 0 <= pretrigger_percent <= 100:
         raise ValueError("预触发比例必须在 0..100%")
+    if channel_mask not in (1, 2, 3):
+        raise ValueError("通道掩码必须为 1(CH1)、2(CH2) 或 3(双通道)")
     return struct.pack(
-        "<BHHBIHB", source, threshold_code, hysteresis_code, edge,
-        capture_depth, round(pretrigger_percent * 10), int(commit),
+        "<BHHBIHBB", source, threshold_code, hysteresis_code, edge,
+        capture_depth, round(pretrigger_percent * 10), int(commit), channel_mask,
     )
 
 

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module adc_control_regs #(
-    parameter integer CONFIG_WIDTH = 167
+    parameter integer CONFIG_WIDTH = 169
 ) (
     input  wire                    clk,
     input  wire                    reset,
@@ -19,6 +19,7 @@ module adc_control_regs #(
 );
 
     localparam [CONFIG_WIDTH-1:0] DEFAULT_CONFIG = {
+        2'b11,       // CH1 + CH2
         1'b0,       // 连续包络关闭
         32'd20_000, // 20Hz，单位 mHz
         32'd1_024,  // 显示点数

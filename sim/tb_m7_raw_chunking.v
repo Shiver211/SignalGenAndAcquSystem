@@ -8,6 +8,7 @@ module tb_m7_raw_chunking;
     wire bridge_request_valid;
     wire [31:0] bridge_offset;
     wire [31:0] bridge_count;
+    wire bridge_single_channel;
     integer word_index = 0;
     wire [31:0] raw_word = word_index;
     wire raw_word_ready;
@@ -35,6 +36,7 @@ module tb_m7_raw_chunking;
         .raw_bridge_request_ready(1'b1), .raw_bridge_frame_start_sample(),
         .raw_bridge_byte_offset(bridge_offset),
         .raw_bridge_byte_count(bridge_count),
+        .raw_bridge_single_channel(bridge_single_channel),
         .raw_word(raw_word), .raw_word_valid(1'b1), .raw_word_ready(raw_word_ready),
         .envelope_valid(1'b0), .envelope_ready(), .envelope_descriptor(208'd0),
         .envelope_point_index(32'd0), .envelope_data(64'd0),
@@ -63,6 +65,8 @@ module tb_m7_raw_chunking;
             if (bridge_offset !== (packet_count - 1) * 1400 || bridge_count !== 1400)
                 $fatal(1, "RAW bridge request mismatch off=%0d len=%0d",
                        bridge_offset, bridge_count);
+            if (bridge_single_channel)
+                $fatal(1, "dual-channel descriptor selected single-channel bridge");
         end
     end
 

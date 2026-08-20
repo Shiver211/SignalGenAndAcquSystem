@@ -24,6 +24,7 @@ module tb_capture_storage_m5;
     reg trigger_falling = 1'b0;
     reg [31:0] capture_depth = 32'd18;
     reg [9:0] pretrigger_permille = 10'd500;
+    reg [1:0] channel_mask = 2'b11;
 
     reg read_request_valid = 1'b0;
     wire read_request_ready;
@@ -282,6 +283,7 @@ module tb_capture_storage_m5;
         .trigger_falling           (trigger_falling),
         .capture_depth             (capture_depth),
         .pretrigger_permille       (pretrigger_permille),
+        .channel_mask              (channel_mask),
         .read_request_valid        (read_request_valid),
         .read_request_ready        (read_request_ready),
         .read_request_start_sample (read_request_start_sample),

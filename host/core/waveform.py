@@ -41,6 +41,51 @@ def time_axis(sample_count: int, sample_rate_hz: float) -> np.ndarray:
     return np.arange(sample_count, dtype=np.float64) / sample_rate_hz
 
 
+def median_filter_3(samples: np.ndarray) -> np.ndarray:
+    """用于波形显示的形状保持三点中值滤波。
+
+    只替换相对两侧趋势大得多的孤立尖峰；真实三角波拐角和正弦峰值
+    的局部斜率变化会保留，避免普通中值滤波把尖角压平。
+    """
+    values = np.asarray(samples, dtype=np.float64)
+    if values.size < 5:
+        return values.copy()
+    result = values.copy()
+    for index in range(2, values.size - 2):
+        left = values[index - 1]
+        center = values[index]
+        right = values[index + 1]
+        median = float(np.median((left, center, right)))
+        deviation = abs(center - median)
+        if deviation == 0:
+            continue
+        # 若两侧几乎相等且外侧趋势很小，才认定为孤立毛刺；
+        # 三角波尖角两侧仍有连续斜率，不会满足这个条件。
+        neighbor_span = abs(left - right)
+        outer_slope = max(
+            abs(values[index - 1] - values[index - 2]),
+            abs(values[index + 2] - values[index + 1]),
+        )
+        if neighbor_span <= deviation * 0.25 and deviation > outer_slope * 3.0:
+            result[index] = median
+    return result
+
+
+def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
+    """五点零相位二项平滑，抑制包络中心线的连续小幅抖动。"""
+    values = np.asarray(samples, dtype=np.float64)
+    if values.size < 5:
+        return values.copy()
+    padded = np.pad(values, (2, 2), mode="edge")
+    windows = np.stack(
+        (padded[:-4], padded[1:-3], padded[2:-2], padded[3:-1], padded[4:]),
+    )
+    return np.sum(
+        windows * np.array([1.0, 4.0, 6.0, 4.0, 1.0])[:, None],
+        axis=0,
+    ) / 16.0
+
+
 def fft_spectrum(samples: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.ndarray]:
     values = np.asarray(samples, dtype=np.float64)
     if values.size < 2 or sample_rate_hz <= 0:

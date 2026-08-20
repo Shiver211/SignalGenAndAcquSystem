@@ -12,6 +12,7 @@ module raw_upload_bridge_m7 #(
     input  wire [31:0] frame_start_sample,
     input  wire [31:0] byte_offset,
     input  wire [31:0] byte_count,
+    input  wire        single_channel,
     output reg         active,
     output reg         done_pulse,
     output wire [31:0] raw_word,
@@ -32,11 +33,14 @@ module raw_upload_bridge_m7 #(
 );
 
     localparam integer FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH) + 1;
+    wire [31:0] bytes_per_sample = single_channel ? 32'd2 : 32'd4;
+    wire [31:0] output_start_sample = byte_offset / bytes_per_sample;
+    wire [31:0] output_sample_count = byte_count / bytes_per_sample;
     wire [63:0] read_command_src = {
-        byte_count >> 2,
-        ((frame_start_sample + (byte_offset >> 2)) >= RAW_RING_SAMPLES) ?
-            (frame_start_sample + (byte_offset >> 2) - RAW_RING_SAMPLES) :
-            (frame_start_sample + (byte_offset >> 2))
+        output_sample_count,
+        ((frame_start_sample + output_start_sample) >= RAW_RING_SAMPLES) ?
+            (frame_start_sample + output_start_sample - RAW_RING_SAMPLES) :
+            (frame_start_sample + output_start_sample)
     };
     wire [63:0] read_command_dest;
     wire read_command_update;
@@ -89,7 +93,10 @@ module raw_upload_bridge_m7 #(
             done_pulse <= 1'b0;
             if (request_valid && request_ready) begin
                 active          <= 1'b1;
-                words_remaining <= byte_count >> 2;
+                // DDR 中每个环形槽仍是一个 32bit 样本；单通道只从
+                // 每个槽输出低 16bit，因此读取字数等于输出样本数，
+                // 而不是固定按 4 字节折算。
+                words_remaining <= output_sample_count;
             end
             if (raw_word_valid && raw_word_ready) begin
                 if (words_remaining == 32'd1) begin

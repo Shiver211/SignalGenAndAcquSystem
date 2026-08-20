@@ -75,7 +75,7 @@ module Top (
     wire [31:0] dac_update_rate_ch1_hz;
     wire [31:0] dac_update_rate_ch2_hz;
 
-    wire [166:0] adc_control_config;
+    wire [168:0] adc_control_config;
     wire [15:0] adc_control_apply_count;
     wire [15:0] adc_control_clear_count;
     wire adc_control_armed;
@@ -246,7 +246,9 @@ module Top (
     wire [31:0] raw_frame_start_sample_sys = raw_metadata_sys[32:1];
     wire raw_frame_valid_sys = raw_metadata_sys[0];
     wire [31:0] raw_frame_id_sys = raw_descriptor_sys[47:16];
-    wire [31:0] raw_frame_total_bytes_sys = raw_descriptor_sys[79:48] << 2;
+    wire [31:0] raw_frame_total_bytes_sys = raw_descriptor_sys[79:48] *
+        ((raw_descriptor_sys[151:144] == 8'h03) ? 32'd4 : 32'd2);
+    wire [7:0] raw_frame_channel_mask_sys = raw_descriptor_sys[151:144];
 
     // 冻结帧元数据在 UI 域长期稳定，整体同步到系统域供 UART 请求校验和上传快照使用。
     xpm_cdc_array_single #(
@@ -264,6 +266,7 @@ module Top (
         .clk_input_100m(clk_sys_100m), .sys_rst_n(sys_rst_n),
         .clk_sys_100m(clk_sys_100m), .reset_sys(rst_sys),
         .clk_adc_65m(clk_adc_read_65m), .reset_adc(rst_adc_read),
+        .config_apply_count_adc(adc_control_apply_count),
         .clk_ref_200m(ddr_ref_clk_200m),
         .ui_clk(ddr_ui_clk), .ui_reset(ddr_ui_reset),
         .raw_upload_request_sys(raw_upload_request),
@@ -302,6 +305,7 @@ module Top (
         .adc_data_b        (adc_data_b),
         .adc_otr_a         (adc_ora),
         .adc_otr_b         (adc_orb),
+        .channel_mask      (adc_control_config[168:167]),
         .raw_a             (),
         .raw_b             (),
         .code_a            (adc_code_a_captured),
@@ -333,6 +337,7 @@ module Top (
         .raw_frame_valid            (raw_frame_valid_sys),
         .raw_frame_id               (raw_frame_id_sys),
         .raw_frame_total_bytes      (raw_frame_total_bytes_sys),
+        .raw_frame_channel_mask     (raw_frame_channel_mask_sys),
         .raw_upload_request         (raw_upload_request),
         .raw_upload_frame_id        (raw_upload_frame_id),
         .raw_upload_offset          (raw_upload_offset),

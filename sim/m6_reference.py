@@ -108,11 +108,17 @@ def cic_reference(
     return result
 
 
-def period_reference(codes: list[int]) -> tuple[int, int, bool]:
+def period_reference(
+    codes: list[int], low: int, high_threshold: int,
+) -> tuple[int, int, bool]:
     crossings: list[int] = []
-    for index in range(1, len(codes)):
-        if codes[index - 1] < 2048 <= codes[index]:
+    high = False
+    for index, code in enumerate(codes):
+        if not high and code >= high_threshold:
             crossings.append(index)
+            high = True
+        elif high and code <= low:
+            high = False
     periods = np.diff(np.asarray(crossings, dtype=np.int64))
     if len(periods) < 8:
         return 0, 0, False
@@ -125,10 +131,19 @@ def period_reference(codes: list[int]) -> tuple[int, int, bool]:
     )
 
 
+def adaptive_thresholds(codes: list[int]) -> tuple[int, int]:
+    minimum, maximum = min(codes), max(codes)
+    center = (minimum + maximum) // 2
+    hysteresis = max(16, (maximum - minimum) // 4)
+    return max(0, center - hysteresis), min(4095, center + hysteresis)
+
+
 def measurement_reference(
     vectors: list[tuple[int, int, int, int]],
 ) -> list[int]:
     result: list[int] = []
+    thresholds_a: tuple[int, int] | None = None
+    thresholds_b: tuple[int, int] | None = None
     for start in range(0, len(vectors), WINDOW_SAMPLES):
         window = vectors[start : start + WINDOW_SAMPLES]
         a = [sample[0] for sample in window]
@@ -139,8 +154,18 @@ def measurement_reference(
         mean_b = sum(b) // len(b)
         otr_a = sum(sample[2] for sample in window)
         otr_b = sum(sample[3] for sample in window)
-        period_a, frequency_a, valid_a = period_reference(a)
-        period_b, frequency_b, valid_b = period_reference(b)
+        if thresholds_a is None:
+            period_a, frequency_a, valid_a = 0, 0, False
+            period_b, frequency_b, valid_b = 0, 0, False
+        else:
+            period_a, frequency_a, valid_a = period_reference(
+                a, thresholds_a[0], thresholds_a[1],
+            )
+            period_b, frequency_b, valid_b = period_reference(
+                b, thresholds_b[0], thresholds_b[1],
+            )
+        thresholds_a = adaptive_thresholds(a)
+        thresholds_b = adaptive_thresholds(b)
 
         packed = 0
         packed |= min_a
@@ -242,4 +267,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

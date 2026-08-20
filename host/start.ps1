@@ -24,8 +24,11 @@ $configured = Get-NetIPAddress `
 $firewallConfigured = Get-NetFirewallRule `
     -DisplayName $FirewallRuleName `
     -ErrorAction SilentlyContinue
+$firewallCoversPublic = $firewallConfigured -and `
+    (($firewallConfigured.Profile -eq "Any") -or `
+     (($firewallConfigured.Profile -band 4) -ne 0))
 
-if (-not $configured -or -not $firewallConfigured) {
+if (-not $configured -or -not $firewallCoversPublic) {
     $setupScript = Join-Path $HostRoot "setup_network.ps1"
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$setupScript`" -InterfaceIndex $interfaceIndex"
     $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList $arguments

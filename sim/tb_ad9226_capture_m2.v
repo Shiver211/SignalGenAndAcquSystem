@@ -9,6 +9,7 @@ module tb_ad9226_capture_m2;
     reg [11:0] adc_data_b = 12'h000;
     reg adc_otr_a = 1'b0;
     reg adc_otr_b = 1'b0;
+    reg [1:0] channel_mask = 2'b11;
     wire adc_clk_a;
     wire adc_clk_b;
     wire [11:0] raw_a;
@@ -39,6 +40,7 @@ module tb_ad9226_capture_m2;
         .adc_data_b        (adc_data_b),
         .adc_otr_a         (adc_otr_a),
         .adc_otr_b         (adc_otr_b),
+        .channel_mask      (channel_mask),
         .raw_a             (raw_a),
         .raw_b             (raw_b),
         .code_a            (code_a),
@@ -115,6 +117,24 @@ module tb_ad9226_capture_m2;
         if (forwarded_edges < 4) begin
             $display("M2_CAPTURE_FAIL insufficient forwarded clock edges=%0d",
                      forwarded_edges);
+            $fatal;
+        end
+
+        // 单通道模式下未选通道在 IOB 后立即丢弃；ADC 转发时钟仍连续，
+        // 避免停钟毛刺和重新启动后的不确定相位。
+        channel_mask = 2'b01;
+        @(negedge clk_adc_read_65m);
+        adc_data_a = 12'h456;
+        adc_data_b = 12'hDEF;
+        adc_otr_a = 1'b0;
+        adc_otr_b = 1'b1;
+        repeat (2) @(posedge clk_adc_read_65m);
+        #0.1;
+        if ((raw_a !== 12'h456) || (raw_b !== 12'h000) ||
+            (code_a !== (12'h456 ^ 12'hFFF)) || (code_b !== 12'hFFF) ||
+            otr_a || otr_b) begin
+            $display("M2_CHANNEL_MASK_FAIL raw=%h/%h code=%h/%h otr=%b/%b",
+                     raw_a, raw_b, code_a, code_b, otr_a, otr_b);
             $fatal;
         end
 

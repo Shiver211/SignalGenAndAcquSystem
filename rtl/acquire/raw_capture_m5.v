@@ -21,6 +21,7 @@ module raw_capture_m5 (
     input  wire        trigger_falling,
     input  wire [31:0] capture_depth,
     input  wire [9:0]  pretrigger_permille,
+    input  wire [1:0]  channel_mask,
 
     output wire [98:0] stream_data,
     output wire        stream_wr_en,
@@ -49,6 +50,7 @@ module raw_capture_m5 (
     reg [11:0] threshold_latched;
     reg [11:0] hysteresis_latched;
     reg        falling_latched;
+    reg [1:0]  channel_mask_latched;
     reg [31:0] depth_latched;
     reg [41:0] pretrigger_product;
     reg [41:0] multiply_multiplicand;
@@ -64,8 +66,22 @@ module raw_capture_m5 (
     reg [31:0] post_samples_seen;
     reg        first_sample_pending;
 
-    wire [11:0] selected_code = source_latched ? code_b : code_a;
-    wire [31:0] raw32 = {6'd0, otr_b, otr_a, code_b, code_a};
+    wire [11:0] selected_code = source_latched ?
+        (channel_mask_latched[1] ? code_b : code_a) :
+        (channel_mask_latched[0] ? code_a : code_b);
+    wire [11:0] packed_code_a = channel_mask_latched[0] ? code_a : 12'd0;
+    wire [11:0] packed_code_b = channel_mask_latched[1] ? code_b : 12'd0;
+    wire packed_otr_a = channel_mask_latched[0] ? otr_a : 1'b0;
+    wire packed_otr_b = channel_mask_latched[1] ? otr_b : 1'b0;
+    // 单通道帧在 DDR 中按 16bit 样本保存（低 12bit 为码值，第 12bit 为 OTR），
+    // 双通道帧继续使用原有 RAW32 布局。
+    wire [15:0] raw16_a = {3'd0, packed_otr_a, packed_code_a};
+    wire [15:0] raw16_b = {3'd0, packed_otr_b, packed_code_b};
+    wire [31:0] raw32 = (channel_mask_latched == 2'b01) ?
+                         {16'd0, raw16_a} :
+                         (channel_mask_latched == 2'b10) ? {16'd0, raw16_b} :
+                         {6'd0, packed_otr_b, packed_otr_a,
+                          packed_code_b, packed_code_a};
     wire [41:0] multiply_product_next = pretrigger_product +
         (multiply_multiplier[0] ? multiply_multiplicand : 42'd0);
 
@@ -124,6 +140,7 @@ module raw_capture_m5 (
             threshold_latched     <= 12'h800;
             hysteresis_latched    <= 12'd16;
             falling_latched       <= 1'b0;
+            channel_mask_latched  <= 2'b11;
             depth_latched         <= 32'd1;
             pretrigger_product    <= 42'd0;
             multiply_multiplicand <= 42'd0;
@@ -150,6 +167,7 @@ module raw_capture_m5 (
                         threshold_latched    <= trigger_threshold;
                         hysteresis_latched   <= trigger_hysteresis;
                         falling_latched      <= trigger_falling;
+                        channel_mask_latched <= channel_mask;
                         depth_latched        <= capture_depth;
                         pretrigger_product   <= 42'd0;
                         multiply_multiplicand <= {10'd0, capture_depth};

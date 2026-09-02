@@ -83,10 +83,8 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.addWidget(self._connection_group())
-        # 发生器仍保留为兼容接口，但基础示波器界面默认不展示高级功能。
-        # 这样左侧不会被三列表格撑出横向滚动条。
+        # DAC 波形控制属于基础联调功能，始终显示在采集控制上方。
         generator = self._generator_group()
-        generator.setVisible(False)
         layout.addWidget(generator)
         layout.addWidget(self._acquisition_group())
         layout.addWidget(self._device_status_group())
@@ -123,7 +121,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return group
 
     def _generator_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("双通道信号发生")
+        group = QtWidgets.QGroupBox("DAC 波形控制")
         grid = QtWidgets.QGridLayout(group)
         grid.addWidget(QtWidgets.QLabel(""), 0, 0)
         grid.addWidget(QtWidgets.QLabel("CH1"), 0, 1)

@@ -29,6 +29,22 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIn("FPGA", window.windowTitle())
             self.assertEqual(window.udp_bind_edit.text(), PC_IP)
             self.assertEqual(window.udp_port_spin.value(), UDP_PORT)
+            self.assertIn("DAC 波形控制", [group.title() for group in window.findChildren(QtWidgets.QGroupBox)])
+            window.close()
+            self.app.processEvents()
+
+    def test_dac_controls_submit_two_channels_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "dac.db")
+            window.wave_boxes[0].setCurrentText("三角")
+            window.frequency_spins[0].setValue(1250)
+            window.amplitude_spins[0].setValue(0.8)
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._apply_generator()
+            self.assertEqual(len(send.call_args_list), 2)
+            self.assertTrue(all(call.args[0] == Command.SET_GENERATOR for call in send.call_args_list))
+            self.assertEqual(send.call_args_list[0].args[1][-1], 0)
+            self.assertEqual(send.call_args_list[1].args[1][-1], 1)
             window.close()
             self.app.processEvents()
 

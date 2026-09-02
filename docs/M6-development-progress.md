@@ -66,7 +66,7 @@ K = max(1, round(65_000_000 * 1000 / (DISPLAY_POINTS * REFRESH_MILLIHZ)))
 - [x] 用户确认采用 `224MiB RAW + 32MiB 抽取帧`，且 M6 不实现 RMS。
 - [x] M6 不实现 RMS；MEASUREMENT_V1 固化为 Min/Max、均值、Vpp、OTR、周期、频率和有效标志。
 - [x] 启动前 Git 工作区干净。
-- [x] M5 基线末项输出 `M5_FRAME_SCANNER_SIM_PASS`；M6 完成后已用 `run_m6_regression.tcl` 完成全量回归并补充 OTR 扫描测试。
+- [x] M5 基线末项输出 `M5_FRAME_SCANNER_SIM_PASS`；M6 完成后已完成全量回归并补充 OTR 扫描测试。
 
 ### 2026-07-15：M3–M5 调试清理
 

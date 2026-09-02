@@ -76,10 +76,10 @@ rtl/control/adc_control_regs.v       # ADC 域配置、ARM 和清错状态占位
 rtl/control/control_plane.v          # UART、寄存器和 CDC 顶层
 rtl/control/dac_update_rate_meter.v  # 两路 DAC 实际提交率测量
 sim/tb_control_plane_m3.v            # UART 位级端到端自检
-scripts/m3_uart_cli.py               # 921600 串口调试工具
-scripts/run_m3_sim.tcl               # M1/M3 回归仿真
-scripts/run_m3_build.tcl             # 综合、实现和报告生成
-scripts/program_m3.tcl               # FPGA 下载
+scripts/uart_cli.py                  # 921600 串口调试工具
+scripts/run_build.tcl                # 当前工程综合、实现和 bitstream 生成
+scripts/program_hw.tcl                # 自动识别 FPGA 并下载
+scripts/build_and_program.cmd         # 一键编译并下载
 ```
 
 M1/M2 验收完成后，M0/M1/M2 ILA 与 M1/M2 VIO 已全部从工程删除；发生参数由 UART 寄存器驱动，ADC 读相位固定为已验证窗口中心 401 步（约 5.508ns）。

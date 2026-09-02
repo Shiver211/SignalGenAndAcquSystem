@@ -4,7 +4,7 @@ import argparse
 import struct
 import unittest
 
-from scripts.m3_uart_cli import build_acquisition_payload
+from scripts.uart_cli import build_acquisition_payload
 
 
 class M3CliProtocolTest(unittest.TestCase):

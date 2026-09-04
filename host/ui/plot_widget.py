@@ -17,7 +17,7 @@ from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, median_filter_3, smooth_binomial_5,
+    codes_to_voltage, fft_spectrum, median_filter_3,
 )
 
 
@@ -44,13 +44,15 @@ class PlotWidget(QtWidgets.QWidget):
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showGrid(x=False, y=False)
-        self.plot.setLabel("left", "垂直分度", units="div")
-        self.plot.setLabel("bottom", "时间", units="s")
+        self.plot.hideAxis("left")
+        self.plot.hideAxis("bottom")
         self.plot.setYRange(-self._HALF_VERTICAL_DIVISIONS,
                             self._HALF_VERTICAL_DIVISIONS, padding=0)
 
         # GridItem 的一个刻度对应一格，保证视图始终是 10×8 网格。
+        # 不画刻度数字，只保留格线。
         self.grid_item = pg.GridItem()
+        self.grid_item.setTextPen(None)
         self.plot.addItem(self.grid_item)
 
         self.trigger_line = pg.InfiniteLine(
@@ -67,8 +69,8 @@ class PlotWidget(QtWidgets.QWidget):
             pen=pg.mkPen("#ffb020", width=1.5), name="CH2",
         )
 
-        # 保留包络边界对象供诊断使用，但标准示波器视图默认只显示中心线。
-        # Min/Max 不是两条独立波形，不能直接作为主波形叠加绘制。
+        # 包络帧里的 Min/Max 只用来重建一条中心线。示波器主视图始终是
+        # 每通道一条描迹，不再把峰峰值画成填充区域。
         self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1))
@@ -81,6 +83,7 @@ class PlotWidget(QtWidgets.QWidget):
         )
         self.plot.addItem(self.fill_a)
         self.plot.addItem(self.fill_b)
+        self._clear_envelope()
 
         self._fft = False
         self._seconds_per_div = 0.001
@@ -228,7 +231,8 @@ class PlotWidget(QtWidgets.QWidget):
         """显示 RAW32/DECIMATED32/ENVELOPE64 帧。
 
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
-        ENVELOPE 是连续流且没有触发索引，时间从当前帧起点开始。
+        ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
+        主视图始终是每通道一条描迹，不用 Min/Max 填色带。
         """
         self._last_frame = frame
         sample_format = frame.header.sample_format
@@ -267,8 +271,6 @@ class PlotWidget(QtWidgets.QWidget):
         self.curve_a.setData(x, self._to_divisions(display_a, 1))
         self.curve_b.setData(x, self._to_divisions(display_b, 2))
         self.trigger_line.setValue(0.0)
-        self.plot.setLabel("bottom", "时间", units="s")
-        self.plot.setLabel("left", "垂直分度", units="div")
         self._apply_visibility()
 
     def _display_envelope(self, frame: CompletedFrame) -> None:
@@ -277,46 +279,36 @@ class PlotWidget(QtWidgets.QWidget):
         if count == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
             return
-        # 每个包络桶代表一段时间内的 [min, max]，中心线是该时间段的
-        # 最佳单值显示，符合标准示波器的“每通道一条波形”语义。
-        center_a = (values["min_a"].astype(np.uint32) +
-                    values["max_a"].astype(np.uint32)) / 2.0
-        center_b = (values["min_b"].astype(np.uint32) +
-                    values["max_b"].astype(np.uint32)) / 2.0
-        # 时基切换后，FPGA/网络中短暂残留的旧帧可能比新窗口短。保持
-        # 帧头给出的真实采样间隔并重复已有数据，立即填满新窗口；这比
-        # 拉伸横轴更重要，因为拉伸会让可见频率失真。新帧到达后会自然
-        # 替换此过渡显示。缩短时基时则只绘制当前窗口需要的前段数据。
+        min_a = values["min_a"].astype(np.float64)
+        max_a = values["max_a"].astype(np.float64)
+        min_b = values["min_b"].astype(np.float64)
+        max_b = values["max_b"].astype(np.float64)
+        # 示波器主视图是一条描迹。1:1 时 min==max，就是 ADC 样本；
+        # 长时基桶的 Min/Max 取中点，仍画成线，不再填色带。
         window_seconds = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
         visible_count = max(1, int(np.ceil(
             window_seconds * float(frame.header.sample_rate_hz)
         )))
-        if visible_count > count:
-            repeats = int(np.ceil(visible_count / count))
-            center_a = np.tile(center_a, repeats)[:visible_count]
-            center_b = np.tile(center_b, repeats)[:visible_count]
-        else:
-            center_a = center_a[:visible_count]
-            center_b = center_b[:visible_count]
-        center_a = median_filter_3(center_a)
-        center_b = median_filter_3(center_b)
-        center_a = smooth_binomial_5(center_a)
-        center_b = smooth_binomial_5(center_b)
-        x = (np.arange(len(center_a), dtype=np.float64) /
-             float(frame.header.sample_rate_hz))
-        self._has_trigger_alignment = False
+        if visible_count < count:
+            min_a, max_a = min_a[:visible_count], max_a[:visible_count]
+            min_b, max_b = min_b[:visible_count], max_b[:visible_count]
+        trace_a = (min_a + max_a) / 2.0
+        trace_b = (min_b + max_b) / 2.0
+        one_to_one = not (
+            np.any((max_a - min_a) > 1.0) or np.any((max_b - min_b) > 1.0)
+        )
+        sample_rate = float(frame.header.sample_rate_hz)
+        if not one_to_one or sample_rate < 1.0e6:
+            trace_a = median_filter_3(trace_a)
+            trace_b = median_filter_3(trace_b)
+        trigger_index = self._clamped_trigger_index(frame, len(trace_a))
+        x = (np.arange(len(trace_a), dtype=np.float64) - trigger_index) / sample_rate
+        self._has_trigger_alignment = trigger_index > 0
         self._set_time_range()
-        self.curve_a.setData(
-            x, self._to_divisions(codes_to_voltage(center_a), 1),
-        )
-        self.curve_b.setData(
-            x, self._to_divisions(codes_to_voltage(center_b), 2),
-        )
         self._clear_envelope()
+        self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
+        self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
         self.trigger_line.setValue(0.0)
-        self.trigger_line.setVisible(False)
-        self.plot.setLabel("bottom", "时间", units="s")
-        self.plot.setLabel("left", "垂直分度", units="div")
         self._apply_visibility()
 
     def _display_fft(self, a: np.ndarray, b: np.ndarray, sample_rate_hz: int) -> None:
@@ -326,8 +318,6 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
         self.curve_a.setData(fa, ma)
         self.curve_b.setData(fb, mb)
-        self.plot.setLabel("bottom", "频率", units="Hz")
-        self.plot.setLabel("left", "幅度", units="V")
         self.trigger_line.setVisible(False)
         if fa.size:
             self.plot.setXRange(0, sample_rate_hz / 2, padding=0)
@@ -400,18 +390,10 @@ class PlotWidget(QtWidgets.QWidget):
             return
         self.curve_a.setVisible(ch1_visible)
         self.curve_b.setVisible(ch2_visible)
-        env_visible = self._last_frame is not None and (
-            self._last_frame.header.sample_format in (
-                SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32,
-            )
-        )
-        # Min/Max 仅作为内部包络数据保留，默认隐藏，避免一个通道出现
-        # 两条看似不同的波形。主波形由 _display_envelope 的中心线表示。
-        for item in (self.min_a, self.max_a, self.fill_a,
-                     self.min_b, self.max_b, self.fill_b):
-            item.setVisible(False)
-        # 连续包络没有触发索引，不能把 x=0 伪装成触发参考线。
-        self.trigger_line.setVisible(not env_visible)
+        for curve in (self.min_a, self.max_a, self.min_b, self.max_b,
+                      self.fill_a, self.fill_b):
+            curve.setVisible(False)
+        self.trigger_line.setVisible(True)
 
     @staticmethod
     def _validate_channel(channel: int) -> int:

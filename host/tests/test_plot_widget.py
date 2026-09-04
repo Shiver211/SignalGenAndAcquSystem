@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
+from host.core.waveform import codes_to_voltage, zero_crossing_frequency
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
 
 
@@ -41,6 +42,9 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertEqual(x_range, [0.0, 2e-2])
             self.assertEqual(y_range, [-4.0, 4.0])
             self.assertEqual(widget.grid_item.opts["tickSpacing"], ([2e-3], [1.0]))
+            self.assertIsNone(widget.grid_item.opts["textPen"])
+            self.assertFalse(widget.plot.getAxis("left").isVisible())
+            self.assertFalse(widget.plot.getAxis("bottom").isVisible())
         finally:
             widget.close()
 
@@ -96,9 +100,11 @@ class PlotWidgetTest(unittest.TestCase):
                                    expected_b)
             self.assertTrue(widget.curve_a.isVisible())
             self.assertTrue(widget.curve_b.isVisible())
-            self.assertFalse(widget.trigger_line.isVisible())
+            self.assertTrue(widget.trigger_line.isVisible())
             self.assertFalse(widget.min_a.isVisible())
             self.assertFalse(widget.max_a.isVisible())
+            self.assertFalse(widget.fill_a.isVisible())
+            self.assertFalse(widget.fill_b.isVisible())
             widget.set_channel_mode("CH2")
             self.assertFalse(widget.min_a.isVisible())
             self.assertFalse(widget.max_a.isVisible())
@@ -116,18 +122,15 @@ class PlotWidgetTest(unittest.TestCase):
                 0x700, 0x900, 0x600, 0xA00,
                 0x600, 0xA00, 0x700, 0x900,
             )
-            # 10 ms 旧帧切到 20 ms 新窗口，应重复一次旧数据立即填满，
-            # 采样间隔仍保持 5 ms，不能通过拉伸横轴伪造。
+            # 旧帧短于新窗口时保持真实采样间隔，不能拉伸或重复伪造频率。
             frame = CompletedFrame(
                 PacketHeader(1, 2, 1, 2, 200, 0, 3, SampleFormat.ENVELOPE64,
                              0, 0, len(payload), 0), payload,
             )
             widget.display_frame(frame)
             x = widget.curve_a.getData()[0]
-            np.testing.assert_allclose(x, [0.0, 0.005, 0.010, 0.015])
+            np.testing.assert_allclose(x, [0.0, 0.005])
             self.assertEqual(widget.plot.viewRange()[0], [0.0, 2e-2])
-            y = widget.curve_a.getData()[1]
-            np.testing.assert_allclose(y[:2], y[2:])
         finally:
             widget.close()
 
@@ -152,23 +155,75 @@ class PlotWidgetTest(unittest.TestCase):
         finally:
             widget.close()
 
-    def test_envelope_display_smooths_continuous_jitter(self) -> None:
+    def test_four_mhz_sine_keeps_period_at_full_sample_rate(self) -> None:
         widget = self.make_widget()
         try:
-            centers = [0x800, 0x880, 0x780, 0x880, 0x780, 0x880, 0x800]
+            sample_rate = 65_000_000
+            count = 650
+            time = np.arange(count, dtype=np.float64) / sample_rate
+            codes = np.clip(
+                np.round((np.sin(2 * np.pi * 4_000_000 * time) + 1.0) * 2047.5),
+                0, 4095,
+            ).astype(np.uint16)
             payload = b"".join(
-                struct.pack("<HHHH", value, value, 0x800, 0x800)
-                for value in centers
+                struct.pack("<HHHH", int(code), int(code), 2048, 2048)
+                for code in codes
             )
             frame = CompletedFrame(
-                PacketHeader(1, 2, 5, len(centers), 1000, 0, 3,
+                PacketHeader(1, 2, 6, count, sample_rate, 0, 3,
+                             SampleFormat.ENVELOPE64, 0, 0, len(payload), 0),
+                payload,
+            )
+            widget.set_timebase(1e-6)
+            widget.display_frame(frame)
+            y = widget.curve_a.getData()[1]
+            volts = y * widget.volts_per_div(1)
+            frequency = zero_crossing_frequency(volts, sample_rate)
+            self.assertGreater(frequency, 3.9e6)
+            self.assertLess(frequency, 4.1e6)
+            np.testing.assert_allclose(
+                volts, codes_to_voltage(codes), atol=0.02,
+            )
+            self.assertFalse(widget.min_a.isVisible())
+        finally:
+            widget.close()
+
+    def test_ten_khz_envelope_draws_a_line_not_a_filled_region(self) -> None:
+        widget = self.make_widget()
+        try:
+            # 1 ms/div × 10 格 = 10 ms；包络点按 204.8 kHz 相当于
+            # 65Msps 下每桶约 317 个样本。Min/Max 故意错开，模拟抽桶。
+            env_rate = 204_800
+            count = 2048
+            time = np.arange(count, dtype=np.float64) / env_rate
+            center = np.clip(
+                np.round((np.sin(2 * np.pi * 10_000 * time) + 1.0) * 2047.5),
+                0, 4095,
+            )
+            min_codes = np.clip(center - 40, 0, 4095).astype(np.uint16)
+            max_codes = np.clip(center + 40, 0, 4095).astype(np.uint16)
+            payload = b"".join(
+                struct.pack("<HHHH", int(lo), int(hi), 2048, 2048)
+                for lo, hi in zip(min_codes, max_codes)
+            )
+            frame = CompletedFrame(
+                PacketHeader(1, 2, 7, count, env_rate, 0, 3,
                              SampleFormat.ENVELOPE64, 0, 0, len(payload), 0),
                 payload,
             )
             widget.set_timebase(1e-3)
+            widget.set_volts_per_div(1, 0.5)
             widget.display_frame(frame)
             y = widget.curve_a.getData()[1]
-            self.assertLess(float(np.max(np.abs(y[2:-2] - y[3:-1]))), 0.2)
+            volts = y * widget.volts_per_div(1)
+            frequency = zero_crossing_frequency(volts, env_rate)
+            self.assertGreater(frequency, 9.5e3)
+            self.assertLess(frequency, 10.5e3)
+            self.assertFalse(widget.min_a.isVisible())
+            self.assertFalse(widget.max_a.isVisible())
+            self.assertFalse(widget.fill_a.isVisible())
+            self.assertFalse(widget.fill_b.isVisible())
+            self.assertTrue(widget.curve_a.isVisible())
         finally:
             widget.close()
 

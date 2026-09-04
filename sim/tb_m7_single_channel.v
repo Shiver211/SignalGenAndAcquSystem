@@ -32,6 +32,7 @@ module tb_m7_single_channel;
         32'd1, 16'd0, 8'h06, 8'h02, 32'd0, 32'd1_000,
         32'd1, 32'd8, 8'h02, 8'h01
     };
+    // total_samples=1, frame_id=8, type=2, version=1；单点即本帧最后一点。
 
     always #4 clk = ~clk;
 
@@ -49,7 +50,7 @@ module tb_m7_single_channel;
         .raw_word_ready(raw_word_ready),
         .envelope_valid(envelope_valid), .envelope_ready(envelope_ready),
         .envelope_descriptor(envelope_descriptor),
-        .envelope_point_index(32'd3),
+        .envelope_point_index(32'd0),
         .envelope_data(64'h4433_2211_8877_6655),
         .measurement_valid(1'b0), .measurement_ready(),
         .measurement_descriptor(208'd0), .measurement_data(368'd0),
@@ -117,7 +118,7 @@ module tb_m7_single_channel;
             @(posedge clk);
             timeout = timeout + 1;
             if (app_request_valid) begin
-                if (app_payload_length != 11'd4 || app_chunk_offset != 32'd12)
+                if (app_payload_length != 11'd4 || app_chunk_offset != 32'd0)
                     $fatal(1, "single-channel ENV metadata mismatch len=%0d off=%0d",
                            app_payload_length, app_chunk_offset);
             end

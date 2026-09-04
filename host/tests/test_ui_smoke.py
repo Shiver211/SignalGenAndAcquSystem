@@ -12,10 +12,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import QtWidgets
 
+from math import ceil
+
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.comm.control_protocol import Command
-from host.config import PC_IP, UART_BAUD, UDP_PORT
-from host.ui.main_window import MainWindow
+from host.config import ADC_SAMPLE_RATE_HZ, PC_IP, UART_BAUD, UDP_PORT
+from host.ui.main_window import MainWindow, RAW_MAX_SAMPLES, TIME_PER_DIV
 
 
 class UiSmokeTest(unittest.TestCase):
@@ -95,6 +97,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_save_table_and_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "replay.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             payload = b"\x01\x00\x02\x00\x03\x00\x04\x00"
             live_frame = CompletedFrame(
                 PacketHeader(1, 2, 9, 1, 100, 0, 3,
@@ -124,8 +127,8 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(fields[-1], 0x02)
             self.assertEqual(fields[4], 1_300_000)  # 65Msps × 10格 × 2ms/div
             self.assertAlmostEqual(window.refresh_spin.value(), 20.0)
-            # 20 Hz 刷新时，包率预算将长时基限制为 500 点/帧。
-            self.assertEqual(window.display_points_spin.value(), 500)
+            # 长时基按桶对齐截到 ≤2048 点 Min/Max，使帧时长贴住十格窗口。
+            self.assertEqual(window.display_points_spin.value(), 2048)
             self.assertFalse(window.ch1_vdiv_combo.isEnabled())
             self.assertTrue(window.ch2_vdiv_combo.isEnabled())
             self.assertEqual(window.trigger_source.currentIndex(), 1)
@@ -139,7 +142,92 @@ class UiSmokeTest(unittest.TestCase):
             window.timebase_combo.setCurrentText("1 ms/div")
             with mock.patch.object(window.serial_link, "send_command"):
                 window._apply_acquisition()
-            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertGreater(window.display_points_spin.value(), 2000)
+            self.assertLessEqual(window.display_points_spin.value(), 2048)
+            window.close()
+            self.app.processEvents()
+
+    def test_short_timebase_keeps_one_to_one_adc_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "hf.db")
+            with mock.patch.object(window.serial_link, "send_command"):
+                window.timebase_combo.setCurrentText("1 µs/div")
+                window._apply_acquisition()
+            self.assertEqual(window.depth_spin.value(), 650)
+            self.assertEqual(window.display_points_spin.value(), 650)
+            with mock.patch.object(window.serial_link, "send_command"):
+                window.timebase_combo.setCurrentText("200 ns/div")
+                window._apply_acquisition()
+            self.assertEqual(window.depth_spin.value(), 130)
+            self.assertEqual(window.display_points_spin.value(), 130)
+            window.close()
+            self.app.processEvents()
+
+    def test_mid_timebase_envelope_duration_stays_within_match_window(self) -> None:
+        """5/10/20 µs 曾因桶取整超 5% 被丢帧卡死；所有时基都必须过关。"""
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "mid-tb.db")
+            try:
+                frozen = []
+                for seconds, label in TIME_PER_DIV:
+                    capture = max(1, min(
+                        RAW_MAX_SAMPLES,
+                        int(ceil(ADC_SAMPLE_RATE_HZ * seconds * 10.0)),
+                    ))
+                    points = window._envelope_display_points(capture, 0x03, 20.0)
+                    bucket = max(1, (capture + points - 1) // points)
+                    env_rate = max(1, ADC_SAMPLE_RATE_HZ // bucket)
+                    actual = points / env_rate
+                    expected = capture / float(ADC_SAMPLE_RATE_HZ)
+                    error = abs(actual - expected) / expected
+                    if error > 0.05:
+                        frozen.append(
+                            f"{label}: {error:.1%} "
+                            f"(depth={capture} points={points} bucket={bucket})"
+                        )
+                self.assertEqual(frozen, [])
+                with mock.patch.object(window.serial_link, "send_command"):
+                    window.timebase_combo.setCurrentText("5 µs/div")
+                    window._apply_acquisition()
+                self.assertEqual(window.depth_spin.value(), 3250)
+                self.assertEqual(window.display_points_spin.value(), 1625)
+                with mock.patch.object(window.serial_link, "send_command"):
+                    window.timebase_combo.setCurrentText("10 µs/div")
+                    window._apply_acquisition()
+                self.assertEqual(window.depth_spin.value(), 6500)
+                self.assertEqual(window.display_points_spin.value(), 1625)
+                with mock.patch.object(window.serial_link, "send_command"):
+                    window.timebase_combo.setCurrentText("20 µs/div")
+                    window._apply_acquisition()
+                self.assertEqual(window.depth_spin.value(), 13000)
+                self.assertEqual(window.display_points_spin.value(), 1858)
+            finally:
+                window.close()
+                self.app.processEvents()
+
+    def test_five_us_envelope_frame_is_not_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "accept-5us.db")
+            window.timebase_combo.setCurrentText("5 µs/div")
+            payload = struct.pack("<" + "H" * (1625 * 4), *([0x800] * 1625 * 4))
+            frame = CompletedFrame(
+                PacketHeader(
+                    1, 2, 11, 1625, ADC_SAMPLE_RATE_HZ // 2, 0, 3,
+                    SampleFormat.ENVELOPE64, 0, 0, len(payload), 3,
+                ),
+                payload,
+            )
+            self.assertTrue(window._envelope_matches_timebase(frame))
+            window._on_frame(frame)
+            self.assertIs(window.current_frame, frame)
+            stale = CompletedFrame(
+                PacketHeader(
+                    1, 2, 12, 2048, ADC_SAMPLE_RATE_HZ // 2, 0, 3,
+                    SampleFormat.ENVELOPE64, 0, 0, 16, 3,
+                ),
+                b"\x00" * 16,
+            )
+            self.assertFalse(window._envelope_matches_timebase(stale))
             window.close()
             self.app.processEvents()
 
@@ -149,7 +237,7 @@ class UiSmokeTest(unittest.TestCase):
             with mock.patch.object(window.serial_link, "send_command") as send:
                 window._on_uart_connection(True, "COM14")
                 window._sync_scope_configuration()
-            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertEqual(window.display_points_spin.value(), 650)
             self.assertTrue(window._continuous_running)
             self.assertTrue(any(call.args[0] == Command.ENVELOPE_ENABLE
                                  for call in send.call_args_list))
@@ -159,6 +247,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_timebase_change_discards_udp_backlog_and_redraws_current_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "flush.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             payload = struct.pack(
                 "<" + "H" * 400,
                 *([0x800, 0x900, 0x700, 0xA00] * 100),

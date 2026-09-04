@@ -1,6 +1,8 @@
 `timescale 1ns / 1ps
 
-// RAW、MEASUREMENT、ENVELOPE 调度器。RAW 命令执行期间连续分块，随后发送测量和包络。
+// RAW、MEASUREMENT、ENVELOPE 调度器。
+// RAW 命令执行期间连续分块；包络按最多 1400 字节打包，避免 1 点/包
+// 把千兆网和上位机打满，短时基才能按 65/130Msps 原样上传 4MHz 波形。
 module network_data_scheduler_m7 (
     input  wire         clk,
     input  wire         reset,
@@ -46,16 +48,22 @@ module network_data_scheduler_m7 (
     output wire         raw_active
 );
 
-    localparam [2:0] S_IDLE         = 3'd0;
-    localparam [2:0] S_RAW_DIVIDE   = 3'd1;
-    localparam [2:0] S_RAW_PREPARE  = 3'd2;
-    localparam [2:0] S_RAW_PAYLOAD  = 3'd3;
-    localparam [2:0] S_ENV_PREPARE  = 3'd4;
-    localparam [2:0] S_ENV_PAYLOAD  = 3'd5;
-    localparam [2:0] S_MEAS_PREPARE = 3'd6;
-    localparam [2:0] S_MEAS_PAYLOAD = 3'd7;
+    localparam [3:0] S_IDLE         = 4'd0;
+    localparam [3:0] S_RAW_DIVIDE   = 4'd1;
+    localparam [3:0] S_RAW_PREPARE  = 4'd2;
+    localparam [3:0] S_RAW_PAYLOAD  = 4'd3;
+    localparam [3:0] S_ENV_ACCUM    = 4'd4;
+    localparam [3:0] S_ENV_PREPARE  = 4'd5;
+    localparam [3:0] S_ENV_FETCH    = 4'd6;
+    localparam [3:0] S_ENV_PAYLOAD  = 4'd7;
+    localparam [3:0] S_MEAS_PREPARE = 4'd8;
+    localparam [3:0] S_MEAS_PAYLOAD = 4'd9;
 
-    reg [2:0] state;
+    localparam integer ENV_MAX_POINTS = 350;
+    localparam integer ENV_MEM_DEPTH = 512;
+    localparam [10:0] ENV_MAX_BYTES = 11'd1400;
+
+    reg [3:0] state;
     reg [207:0] raw_descriptor_latched;
     reg [31:0] raw_frame_start_latched;
     reg [31:0] raw_offset_current;
@@ -71,11 +79,37 @@ module network_data_scheduler_m7 (
 
     reg [207:0] env_descriptor_latched;
     reg [31:0] env_point_index_latched;
-    reg [63:0] env_data_latched;
-    reg [3:0] env_byte_index;
+    reg [10:0] env_byte_index;
+    reg [10:0] env_payload_bytes;
+    reg [8:0]  env_point_count;
+    reg [8:0]  env_rd_addr;
+    reg        env_fetch_hold;
+    reg        env_last_chunk;
+    (* ram_style = "block" *) reg [63:0] env_point_mem [0:ENV_MEM_DEPTH-1];
+    reg [63:0] env_mem_dout;
+    reg [63:0] env_current_word;
+    wire env_wr_en = (envelope_valid && envelope_ready);
+    wire [8:0] env_wr_addr = (state == S_IDLE) ? 9'd0 : env_point_count;
     wire env_single_channel = (env_descriptor_latched[151:144] != 8'h03);
-    wire [3:0] env_last_byte = env_single_channel ? 4'd3 : 4'd7;
-    wire [31:0] env_bytes_per_point = env_single_channel ? 32'd4 : 32'd8;
+    wire env_channel_a = (env_descriptor_latched[151:144] == 8'h01);
+    wire [4:0] env_bytes_per_point = env_single_channel ? 5'd4 : 5'd8;
+    wire [31:0] env_bytes_per_point32 = {27'd0, env_bytes_per_point};
+    wire [2:0] env_word_byte = env_single_channel ?
+        (env_channel_a ? {1'b0, env_byte_index[1:0]} :
+                         {1'b1, env_byte_index[1:0]}) :
+        env_byte_index[2:0];
+    wire env_point_byte_last = env_single_channel ?
+        (env_byte_index[1:0] == 2'd3) : (env_byte_index[2:0] == 3'd7);
+    wire [10:0] env_last_byte = env_payload_bytes - 11'd1;
+
+    wire [7:0] env_in_mask = envelope_descriptor[151:144];
+    wire env_in_single = (env_in_mask != 8'h03);
+    wire [4:0] env_in_bpp = env_in_single ? 5'd4 : 5'd8;
+    wire [31:0] env_in_total = envelope_descriptor[79:48];
+    wire env_in_last = (env_in_total == 32'd0) ||
+                       (envelope_point_index >= (env_in_total - 32'd1));
+    wire [10:0] env_next_bytes = env_payload_bytes + {6'd0, env_in_bpp};
+    wire env_in_packet_end = env_in_last || (env_next_bytes >= ENV_MAX_BYTES);
 
     reg [207:0] meas_descriptor_latched;
     reg [367:0] meas_data_latched;
@@ -106,8 +140,9 @@ module network_data_scheduler_m7 (
                         (state == S_RAW_PREPARE) || (state == S_RAW_PAYLOAD) ||
                         (raw_bytes_remaining != 32'd0);
 
-    assign envelope_ready = (state == S_IDLE) && !raw_command_valid &&
-                            !measurement_valid;
+    assign envelope_ready = ((state == S_IDLE) && !raw_command_valid &&
+                             !measurement_valid) ||
+                            (state == S_ENV_ACCUM);
     assign measurement_ready = (state == S_IDLE) && !raw_command_valid;
 
     assign raw_bridge_request_valid = (state == S_RAW_PREPARE) &&
@@ -122,31 +157,42 @@ module network_data_scheduler_m7 (
                                (state == S_MEAS_PREPARE);
     assign app_descriptor = ((state == S_RAW_PREPARE) ||
                              (state == S_RAW_PAYLOAD)) ? raw_descriptor_latched :
-                            ((state == S_ENV_PREPARE) ||
+                            ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
                              (state == S_ENV_PAYLOAD)) ? env_descriptor_latched :
                                                          meas_descriptor_latched;
     assign app_chunk_index = ((state == S_RAW_PREPARE) ||
                               (state == S_RAW_PAYLOAD)) ? raw_chunk_index_current :
-                             ((state == S_ENV_PREPARE) ||
-                              (state == S_ENV_PAYLOAD)) ? env_point_index_latched[15:0] :
-                                                          16'd0;
+                             ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
+                              (state == S_ENV_PAYLOAD)) ?
+                                 env_point_index_latched[15:0] : 16'd0;
     assign app_chunk_offset = ((state == S_RAW_PREPARE) ||
                                (state == S_RAW_PAYLOAD)) ? raw_offset_current :
-                              ((state == S_ENV_PREPARE) ||
+                              ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
                                (state == S_ENV_PAYLOAD)) ?
                                    (env_point_index_latched *
-                                    env_bytes_per_point) :
+                                    env_bytes_per_point32) :
                                                            32'd0;
     assign app_flags = ((state == S_RAW_PREPARE) ||
                         (state == S_RAW_PAYLOAD)) ?
                            {14'd0, raw_last_chunk, (raw_offset_current == 32'd0)} :
-                       ((state == S_ENV_PREPARE) ||
-                        (state == S_ENV_PAYLOAD)) ? 16'h0003 : 16'h0003;
+                       ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
+                        (state == S_ENV_PAYLOAD)) ?
+                           {14'd0, env_last_chunk,
+                            (env_point_index_latched == 32'd0)} : 16'h0003;
     assign app_payload_length = ((state == S_RAW_PREPARE) ||
                                  (state == S_RAW_PAYLOAD)) ? raw_chunk_length :
-                                ((state == S_ENV_PREPARE) ||
-                                 (state == S_ENV_PAYLOAD)) ?
-                                  (env_single_channel ? 11'd4 : 11'd8) : 11'd46;
+                                ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
+                                 (state == S_ENV_PAYLOAD)) ? env_payload_bytes :
+                                                            11'd46;
+
+    always @(posedge clk) begin
+        if (env_wr_en)
+            env_point_mem[env_wr_addr] <= envelope_data;
+    end
+
+    always @(posedge clk) begin
+        env_mem_dout <= env_point_mem[env_rd_addr];
+    end
 
     assign app_payload_valid = (state == S_RAW_PAYLOAD) ? raw_word_valid :
                                (state == S_ENV_PAYLOAD) ? 1'b1 :
@@ -168,12 +214,16 @@ module network_data_scheduler_m7 (
                 endcase
             end
         end else if (state == S_ENV_PAYLOAD) begin
-            if (env_single_channel)
-                app_payload_data = env_data_latched[
-                    (env_descriptor_latched[151:144] == 8'h01 ? 0 : 32) +
-                    env_byte_index * 8 +: 8];
-            else
-                app_payload_data = env_data_latched[env_byte_index * 8 +: 8];
+            case (env_word_byte)
+                3'd0: app_payload_data = env_current_word[7:0];
+                3'd1: app_payload_data = env_current_word[15:8];
+                3'd2: app_payload_data = env_current_word[23:16];
+                3'd3: app_payload_data = env_current_word[31:24];
+                3'd4: app_payload_data = env_current_word[39:32];
+                3'd5: app_payload_data = env_current_word[47:40];
+                3'd6: app_payload_data = env_current_word[55:48];
+                default: app_payload_data = env_current_word[63:56];
+            endcase
         end else if (state == S_MEAS_PAYLOAD) begin
             app_payload_data = meas_data_latched[meas_byte_index * 8 +: 8];
         end
@@ -195,8 +245,13 @@ module network_data_scheduler_m7 (
             raw_divider_start           <= 1'b0;
             env_descriptor_latched      <= 208'd0;
             env_point_index_latched     <= 32'd0;
-            env_data_latched            <= 64'd0;
-            env_byte_index              <= 4'd0;
+            env_byte_index              <= 11'd0;
+            env_payload_bytes           <= 11'd0;
+            env_point_count             <= 9'd0;
+            env_rd_addr                 <= 9'd0;
+            env_current_word            <= 64'd0;
+            env_fetch_hold              <= 1'b0;
+            env_last_chunk              <= 1'b0;
             meas_descriptor_latched     <= 208'd0;
             meas_data_latched           <= 368'd0;
             meas_byte_index             <= 6'd0;
@@ -225,9 +280,16 @@ module network_data_scheduler_m7 (
                     end else if (envelope_valid && envelope_ready) begin
                         env_descriptor_latched  <= envelope_descriptor;
                         env_point_index_latched <= envelope_point_index;
-                        env_data_latched        <= envelope_data;
-                        env_byte_index          <= 4'd0;
-                        state                   <= S_ENV_PREPARE;
+                        env_payload_bytes       <= {6'd0, env_in_bpp};
+                        env_point_count         <= 9'd1;
+                        env_last_chunk          <= env_in_last;
+                        env_byte_index          <= 11'd0;
+                        env_rd_addr             <= 9'd0;
+                        env_current_word        <= envelope_data;
+                        if (env_in_last)
+                            state <= S_ENV_PREPARE;
+                        else
+                            state <= S_ENV_ACCUM;
                     end else if (raw_bytes_remaining != 32'd0) begin
                         raw_bridge_requested <= 1'b0;
                         app_requested        <= 1'b0;
@@ -289,17 +351,46 @@ module network_data_scheduler_m7 (
                     end
                 end
 
+                S_ENV_ACCUM: begin
+                    if (envelope_valid) begin
+                        env_payload_bytes <= env_next_bytes;
+                        env_point_count   <= env_point_count + 1'b1;
+                        env_last_chunk    <= env_in_last;
+                        if (env_in_packet_end) begin
+                            env_rd_addr <= 9'd0;
+                            state       <= S_ENV_PREPARE;
+                        end
+                    end
+                end
+
                 S_ENV_PREPARE: begin
-                    if (app_request_valid && app_request_ready)
-                        state <= S_ENV_PAYLOAD;
+                    if (app_request_valid && app_request_ready) begin
+                        env_fetch_hold <= 1'b0;
+                        state          <= S_ENV_FETCH;
+                    end
+                end
+
+                S_ENV_FETCH: begin
+                    if (env_fetch_hold) begin
+                        env_rd_addr    <= 9'd1;
+                        env_byte_index <= 11'd0;
+                        state          <= S_ENV_PAYLOAD;
+                    end else begin
+                        env_fetch_hold <= 1'b1;
+                    end
                 end
 
                 S_ENV_PAYLOAD: begin
                     if (app_payload_ready) begin
-                        if (env_byte_index == env_last_byte)
+                        if (env_byte_index == env_last_byte) begin
                             state <= S_IDLE;
-                        else
+                        end else begin
                             env_byte_index <= env_byte_index + 1'b1;
+                            if (env_point_byte_last) begin
+                                env_current_word <= env_mem_dout;
+                                env_rd_addr      <= env_rd_addr + 1'b1;
+                            end
+                        end
                     end
                 end
 

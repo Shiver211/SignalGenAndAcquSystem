@@ -1,7 +1,9 @@
 `timescale 1ns / 1ps
 
+// 2048 点可吸收 65Msps 1:1 约 31µs 窗口，足够按原样画出 4MHz；
+// 130Msps 交织时同一深度覆盖约 16µs。超出后仍按最新帧策略冲刷。
 module envelope_async_fifo_m7 #(
-    parameter integer FIFO_DEPTH = 256,
+    parameter integer FIFO_DEPTH = 2048,
     parameter integer DATA_WIDTH = 304,
     parameter integer COUNT_WIDTH = $clog2(FIFO_DEPTH) + 1
 ) (

@@ -1,6 +1,7 @@
 `timescale 1ns / 1ps
 
 // 把采集窗口和显示参数转换为包络桶大小、刷新间隔和抽取后的有效采样率。
+// SAMPLE_RATE_HZ 当前为 65Msps；130Msps 交织时只改此参数，桶公式保持不变。
 module processing_config_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000
 ) (

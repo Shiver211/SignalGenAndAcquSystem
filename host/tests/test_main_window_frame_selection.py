@@ -32,6 +32,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
     def test_measurement_does_not_replace_current_waveform(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "selection.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             envelope = frame(SampleFormat.ENVELOPE64, struct.pack("<HHHH", 1, 2, 3, 4))
             measurement = frame(
                 SampleFormat.MEASUREMENT_V1,
@@ -87,6 +88,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
     def test_timebase_change_redraws_old_envelope_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "timebase-clear.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             payload = struct.pack(
                 "<" + "H" * 400,
                 *([0x700, 0x900, 0x600, 0xA00] * 100),
@@ -100,8 +102,8 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
             self.assertIs(window.current_frame, envelope)
             window.timebase_combo.setCurrentText("2 ms/div")
             self.assertIs(window.current_frame, envelope)
-            self.assertEqual(len(window.plot_widget.curve_a.getData()[0]), 200)
-            self.assertEqual(len(window.plot_widget.curve_b.getData()[0]), 200)
+            self.assertEqual(len(window.plot_widget.curve_a.getData()[0]), 100)
+            self.assertEqual(len(window.plot_widget.curve_b.getData()[0]), 100)
             window.close()
             self.app.processEvents()
 

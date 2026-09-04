@@ -17,7 +17,7 @@ from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, median_filter_3, smooth_binomial_5,
+    codes_to_voltage, fft_spectrum, median_filter_3,
 )
 
 
@@ -277,44 +277,44 @@ class PlotWidget(QtWidgets.QWidget):
         if count == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
             return
-        # 每个包络桶代表一段时间内的 [min, max]，中心线是该时间段的
-        # 最佳单值显示，符合标准示波器的“每通道一条波形”语义。
-        center_a = (values["min_a"].astype(np.uint32) +
-                    values["max_a"].astype(np.uint32)) / 2.0
-        center_b = (values["min_b"].astype(np.uint32) +
-                    values["max_b"].astype(np.uint32)) / 2.0
-        # 时基切换后，FPGA/网络中短暂残留的旧帧可能比新窗口短。保持
-        # 帧头给出的真实采样间隔并重复已有数据，立即填满新窗口；这比
-        # 拉伸横轴更重要，因为拉伸会让可见频率失真。新帧到达后会自然
-        # 替换此过渡显示。缩短时基时则只绘制当前窗口需要的前段数据。
+        min_a = values["min_a"].astype(np.float64)
+        max_a = values["max_a"].astype(np.float64)
+        min_b = values["min_b"].astype(np.float64)
+        max_b = values["max_b"].astype(np.float64)
+        # 1:1 桶的 min==max，就是 ADC 样本；长时基 Min/Max 必须画成峰峰值
+        # 色带，不能取中心线，否则 4MHz 会被平均成一条直流。
         window_seconds = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
         visible_count = max(1, int(np.ceil(
             window_seconds * float(frame.header.sample_rate_hz)
         )))
-        if visible_count > count:
-            repeats = int(np.ceil(visible_count / count))
-            center_a = np.tile(center_a, repeats)[:visible_count]
-            center_b = np.tile(center_b, repeats)[:visible_count]
+        if visible_count < count:
+            min_a, max_a = min_a[:visible_count], max_a[:visible_count]
+            min_b, max_b = min_b[:visible_count], max_b[:visible_count]
+        trace_a = (min_a + max_a) / 2.0
+        trace_b = (min_b + max_b) / 2.0
+        peak_detect = bool(
+            np.any((max_a - min_a) > 1.0) or np.any((max_b - min_b) > 1.0)
+        )
+        sample_rate = float(frame.header.sample_rate_hz)
+        if not peak_detect and sample_rate >= 1.0e6:
+            # 短时基原样波形：保留 4MHz 峰谷，不做中值/平滑。
+            pass
         else:
-            center_a = center_a[:visible_count]
-            center_b = center_b[:visible_count]
-        center_a = median_filter_3(center_a)
-        center_b = median_filter_3(center_b)
-        center_a = smooth_binomial_5(center_a)
-        center_b = smooth_binomial_5(center_b)
-        x = (np.arange(len(center_a), dtype=np.float64) /
-             float(frame.header.sample_rate_hz))
+            trace_a = median_filter_3(trace_a)
+            trace_b = median_filter_3(trace_b)
+        x = np.arange(len(trace_a), dtype=np.float64) / sample_rate
         self._has_trigger_alignment = False
         self._set_time_range()
-        self.curve_a.setData(
-            x, self._to_divisions(codes_to_voltage(center_a), 1),
-        )
-        self.curve_b.setData(
-            x, self._to_divisions(codes_to_voltage(center_b), 2),
-        )
-        self._clear_envelope()
+        self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
+        self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
+        if peak_detect:
+            self.min_a.setData(x, self._to_divisions(codes_to_voltage(min_a), 1))
+            self.max_a.setData(x, self._to_divisions(codes_to_voltage(max_a), 1))
+            self.min_b.setData(x, self._to_divisions(codes_to_voltage(min_b), 2))
+            self.max_b.setData(x, self._to_divisions(codes_to_voltage(max_b), 2))
+        else:
+            self._clear_envelope()
         self.trigger_line.setValue(0.0)
-        self.trigger_line.setVisible(False)
         self.plot.setLabel("bottom", "时间", units="s")
         self.plot.setLabel("left", "垂直分度", units="div")
         self._apply_visibility()
@@ -405,13 +405,21 @@ class PlotWidget(QtWidgets.QWidget):
                 SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32,
             )
         )
-        # Min/Max 仅作为内部包络数据保留，默认隐藏，避免一个通道出现
-        # 两条看似不同的波形。主波形由 _display_envelope 的中心线表示。
-        for item in (self.min_a, self.max_a, self.fill_a,
-                     self.min_b, self.max_b, self.fill_b):
-            item.setVisible(False)
-        # 连续包络没有触发索引，不能把 x=0 伪装成触发参考线。
-        self.trigger_line.setVisible(not env_visible)
+        peak_a = self._curve_has_samples(self.min_a)
+        peak_b = self._curve_has_samples(self.min_b)
+        self.min_a.setVisible(ch1_visible and peak_a)
+        self.max_a.setVisible(ch1_visible and peak_a)
+        self.fill_a.setVisible(ch1_visible and peak_a)
+        self.min_b.setVisible(ch2_visible and peak_b)
+        self.max_b.setVisible(ch2_visible and peak_b)
+        self.fill_b.setVisible(ch2_visible and peak_b)
+        # 包络帧从触发沿开始，x=0 就是触发位置（屏幕左缘）。
+        self.trigger_line.setVisible(True)
+
+    @staticmethod
+    def _curve_has_samples(curve: pg.PlotDataItem) -> bool:
+        data = curve.getData()
+        return bool(data is not None and data[0] is not None and len(data[0]) > 0)
 
     @staticmethod
     def _validate_channel(channel: int) -> int:

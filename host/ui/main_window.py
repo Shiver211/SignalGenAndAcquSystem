@@ -18,18 +18,15 @@ from host.comm.data_protocol import (
 )
 from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
-from host.config import PC_IP, UART_BAUD, UDP_PORT
+from host.config import (
+    ADC_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
+    PC_IP, UART_BAUD, UDP_PORT,
+)
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
 
 
-ADC_SAMPLE_RATE_HZ = 65_000_000
 RAW_MAX_SAMPLES = 58_720_256
-# FPGA 当前每个包络桶对应一个 UDP 应用包。点数上限用于限制
-# 接收线程、CRC 校验和 Qt 事件队列的实时负载，避免长时基下
-# 每帧大量小包让界面持续积压。另一个上限按时间窗保留短时基分辨率。
-MAX_ENVELOPE_POINTS_PER_SECOND = 75_000
-MAX_ENVELOPE_UDP_PACKETS_PER_SECOND = 10_000
 VOLTAGE_PER_DIV = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
 TIME_PER_DIV = (
     (10e-9, "10 ns/div"), (20e-9, "20 ns/div"), (50e-9, "50 ns/div"),
@@ -184,12 +181,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo = QtWidgets.QComboBox(); self.mode_combo.addItems(["RAW", "ENVELOPE"])
         self.mode_combo.setCurrentIndex(1)
         self.decimation_combo = QtWidgets.QComboBox(); self.decimation_combo.addItems([str(1 << i) for i in range(11)])
-        self.display_points_spin = QtWidgets.QSpinBox(); self.display_points_spin.setRange(1, 1_000_000); self.display_points_spin.setValue(1024)
+        self.display_points_spin = QtWidgets.QSpinBox(); self.display_points_spin.setRange(1, MAX_ENVELOPE_POINTS); self.display_points_spin.setValue(MAX_ENVELOPE_POINTS)
         self.refresh_spin = QtWidgets.QDoubleSpinBox(); self.refresh_spin.setRange(0.001, 4_000_000); self.refresh_spin.setDecimals(3); self.refresh_spin.setValue(20); self.refresh_spin.setSuffix(" Hz")
         self.timebase_combo = QtWidgets.QComboBox()
         for value, label in TIME_PER_DIV:
             self.timebase_combo.addItem(label, value)
-        self.timebase_combo.setCurrentText("1 ms/div")
+        # 1 µs/div × 10 格 = 10 µs，65Msps 下 650 点 1:1，4MHz 每格约 4 个周期。
+        self.timebase_combo.setCurrentText("1 µs/div")
         form.addRow("通道模式", self.channel_mode_combo)
         form.addRow("CH1 电压", self.ch1_vdiv_combo)
         form.addRow("CH1 位置", self.ch1_position_spin)
@@ -377,21 +375,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         display_points = self.display_points_spin.value()
         if DataMode(self.mode_combo.currentIndex()) == DataMode.ENVELOPE:
-            max_envelope_points = max(
-                1,
-                int(10.0 * time_per_div * MAX_ENVELOPE_POINTS_PER_SECOND),
-            )
-            max_points_by_packet_rate = max(
-                1,
-                int(MAX_ENVELOPE_UDP_PACKETS_PER_SECOND /
-                    max(self.refresh_spin.value(), 1.0)),
-            )
-            # 包络模式的点数由时基和链路能力决定。每次提交都重新
-            # 计算，避免短时基曾经降到 100 点后，切回长时基仍只剩
-            # 100 点的状态残留。硬件一个点占一个 UDP 包，额外限制
-            # 每秒包数，防止长时基把接收线程和 Qt 事件队列压满。
-            display_points = min(
-                capture_depth, max_envelope_points, max_points_by_packet_rate,
+            display_points = self._envelope_display_points(
+                capture_depth, channel_mask, self.refresh_spin.value(),
             )
             self.display_points_spin.setValue(display_points)
         self.serial_link.send_command(Command.SET_PROCESSING, processing_payload(
@@ -508,6 +493,22 @@ class MainWindow(QtWidgets.QMainWindow):
             # 测量包只更新读数，不能覆盖用户准备保存/回放的波形帧。
             self.current_frame = frame
             self.plot_widget.display_frame(frame)
+
+    def _envelope_display_points(
+        self, capture_depth: int, channel_mask: int, refresh_hz: float,
+    ) -> int:
+        """按 1:1 优先、千兆网和 FIFO 深度截断，计算包络帧点数。
+
+        短时基（窗口点数 ≤ 2048）保持 ADC 原样，4MHz 在 65Msps 下约 16
+        点/周期，130Msps 交织后约 32 点/周期。长时基才做 Min/Max 抽桶。
+        """
+        bytes_per_point = 4 if channel_mask in (1, 2) else 8
+        refresh = max(float(refresh_hz), 1.0)
+        max_by_gbe = max(
+            1,
+            int(GBE_ENVELOPE_BYTES_PER_SEC / refresh / bytes_per_point),
+        )
+        return max(1, min(int(capture_depth), MAX_ENVELOPE_POINTS, max_by_gbe))
 
     def _envelope_matches_timebase(self, frame: CompletedFrame) -> bool:
         """判断包络帧总时长是否匹配当前示波器横轴。"""

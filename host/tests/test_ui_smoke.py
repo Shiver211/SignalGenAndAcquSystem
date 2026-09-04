@@ -95,6 +95,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_save_table_and_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "replay.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             payload = b"\x01\x00\x02\x00\x03\x00\x04\x00"
             live_frame = CompletedFrame(
                 PacketHeader(1, 2, 9, 1, 100, 0, 3,
@@ -124,8 +125,8 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(fields[-1], 0x02)
             self.assertEqual(fields[4], 1_300_000)  # 65Msps × 10格 × 2ms/div
             self.assertAlmostEqual(window.refresh_spin.value(), 20.0)
-            # 20 Hz 刷新时，包率预算将长时基限制为 500 点/帧。
-            self.assertEqual(window.display_points_spin.value(), 500)
+            # 长时基超过 FIFO/1:1 预算时截断为 2048 点 Min/Max。
+            self.assertEqual(window.display_points_spin.value(), 2048)
             self.assertFalse(window.ch1_vdiv_combo.isEnabled())
             self.assertTrue(window.ch2_vdiv_combo.isEnabled())
             self.assertEqual(window.trigger_source.currentIndex(), 1)
@@ -139,7 +140,23 @@ class UiSmokeTest(unittest.TestCase):
             window.timebase_combo.setCurrentText("1 ms/div")
             with mock.patch.object(window.serial_link, "send_command"):
                 window._apply_acquisition()
-            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertEqual(window.display_points_spin.value(), 2048)
+            window.close()
+            self.app.processEvents()
+
+    def test_short_timebase_keeps_one_to_one_adc_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "hf.db")
+            with mock.patch.object(window.serial_link, "send_command"):
+                window.timebase_combo.setCurrentText("1 µs/div")
+                window._apply_acquisition()
+            self.assertEqual(window.depth_spin.value(), 650)
+            self.assertEqual(window.display_points_spin.value(), 650)
+            with mock.patch.object(window.serial_link, "send_command"):
+                window.timebase_combo.setCurrentText("200 ns/div")
+                window._apply_acquisition()
+            self.assertEqual(window.depth_spin.value(), 130)
+            self.assertEqual(window.display_points_spin.value(), 130)
             window.close()
             self.app.processEvents()
 
@@ -149,7 +166,7 @@ class UiSmokeTest(unittest.TestCase):
             with mock.patch.object(window.serial_link, "send_command") as send:
                 window._on_uart_connection(True, "COM14")
                 window._sync_scope_configuration()
-            self.assertEqual(window.display_points_spin.value(), 500)
+            self.assertEqual(window.display_points_spin.value(), 650)
             self.assertTrue(window._continuous_running)
             self.assertTrue(any(call.args[0] == Command.ENVELOPE_ENABLE
                                  for call in send.call_args_list))
@@ -159,6 +176,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_timebase_change_discards_udp_backlog_and_redraws_current_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(Path(directory) / "flush.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
             payload = struct.pack(
                 "<" + "H" * 400,
                 *([0x800, 0x900, 0x700, 0xA00] * 100),

@@ -48,6 +48,20 @@ class UdpReassemblyTest(unittest.TestCase):
         self.assertEqual(reassembler.dropped_frame_count, 1)
         self.assertNotIn((DataType.ENVELOPE_FRAME, 1), reassembler.frames)
 
+    def test_batched_envelope_chunks_reassemble(self) -> None:
+        source = bytes((index * 3) & 0xFF for index in range(1600))
+        packets = [
+            packet(source[:1400], 0, len(source), data_type=DataType.ENVELOPE_FRAME),
+            packet(source[1400:], 1400, len(source), data_type=DataType.ENVELOPE_FRAME),
+        ]
+        reassembler = FrameReassembler()
+        completed = None
+        for datagram in packets:
+            completed = reassembler.ingest(datagram) or completed
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed.payload, source)
+        self.assertEqual(completed.header.total_samples, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,13 +44,15 @@ class PlotWidget(QtWidgets.QWidget):
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showGrid(x=False, y=False)
-        self.plot.setLabel("left", "垂直分度", units="div")
-        self.plot.setLabel("bottom", "时间", units="s")
+        self.plot.hideAxis("left")
+        self.plot.hideAxis("bottom")
         self.plot.setYRange(-self._HALF_VERTICAL_DIVISIONS,
                             self._HALF_VERTICAL_DIVISIONS, padding=0)
 
         # GridItem 的一个刻度对应一格，保证视图始终是 10×8 网格。
+        # 不画刻度数字，只保留格线。
         self.grid_item = pg.GridItem()
+        self.grid_item.setTextPen(None)
         self.plot.addItem(self.grid_item)
 
         self.trigger_line = pg.InfiniteLine(
@@ -269,8 +271,6 @@ class PlotWidget(QtWidgets.QWidget):
         self.curve_a.setData(x, self._to_divisions(display_a, 1))
         self.curve_b.setData(x, self._to_divisions(display_b, 2))
         self.trigger_line.setValue(0.0)
-        self.plot.setLabel("bottom", "时间", units="s")
-        self.plot.setLabel("left", "垂直分度", units="div")
         self._apply_visibility()
 
     def _display_envelope(self, frame: CompletedFrame) -> None:
@@ -309,8 +309,6 @@ class PlotWidget(QtWidgets.QWidget):
         self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
         self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
         self.trigger_line.setValue(0.0)
-        self.plot.setLabel("bottom", "时间", units="s")
-        self.plot.setLabel("left", "垂直分度", units="div")
         self._apply_visibility()
 
     def _display_fft(self, a: np.ndarray, b: np.ndarray, sample_rate_hz: int) -> None:
@@ -320,8 +318,6 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
         self.curve_a.setData(fa, ma)
         self.curve_b.setData(fb, mb)
-        self.plot.setLabel("bottom", "频率", units="Hz")
-        self.plot.setLabel("left", "幅度", units="V")
         self.trigger_line.setVisible(False)
         if fa.size:
             self.plot.setXRange(0, sample_rate_hz / 2, padding=0)

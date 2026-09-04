@@ -42,6 +42,9 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertEqual(x_range, [0.0, 2e-2])
             self.assertEqual(y_range, [-4.0, 4.0])
             self.assertEqual(widget.grid_item.opts["tickSpacing"], ([2e-3], [1.0]))
+            self.assertIsNone(widget.grid_item.opts["textPen"])
+            self.assertFalse(widget.plot.getAxis("left").isVisible())
+            self.assertFalse(widget.plot.getAxis("bottom").isVisible())
         finally:
             widget.close()
 

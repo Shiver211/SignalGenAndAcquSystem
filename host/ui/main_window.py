@@ -499,8 +499,10 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> int:
         """按 1:1 优先、千兆网和 FIFO 深度截断，计算包络帧点数。
 
-        短时基（窗口点数 ≤ 2048）保持 ADC 原样，4MHz 在 65Msps 下约 16
-        点/周期，130Msps 交织后约 32 点/周期。长时基才做 Min/Max 抽桶。
+        短时基（窗口点数 ≤ 2048）保持 ADC 原样。长时基做 Min/Max 抽桶时，
+        点数取 ``ceil(capture_depth / bucket)``，让 ``点数 × 桶长`` 贴住
+        十格窗口。若固定 2048 点，5/10/20 µs 的桶取整会把帧时长拉长超过
+        5%，``_envelope_matches_timebase`` 会把新帧全部丢掉，波形卡死。
         """
         bytes_per_point = 4 if channel_mask in (1, 2) else 8
         refresh = max(float(refresh_hz), 1.0)
@@ -508,7 +510,12 @@ class MainWindow(QtWidgets.QMainWindow):
             1,
             int(GBE_ENVELOPE_BYTES_PER_SEC / refresh / bytes_per_point),
         )
-        return max(1, min(int(capture_depth), MAX_ENVELOPE_POINTS, max_by_gbe))
+        cap = max(1, int(capture_depth))
+        limit = max(1, min(MAX_ENVELOPE_POINTS, max_by_gbe))
+        if cap <= limit:
+            return cap
+        bucket = (cap + limit - 1) // limit
+        return max(1, (cap + bucket - 1) // bucket)
 
     def _envelope_matches_timebase(self, frame: CompletedFrame) -> bool:
         """判断包络帧总时长是否匹配当前示波器横轴。"""
@@ -518,7 +525,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if sample_rate <= 0 or sample_count <= 0 or seconds_per_div is None:
             return False
         actual = sample_count / float(sample_rate)
-        expected = 10.0 * float(seconds_per_div)
+        window = 10.0 * float(seconds_per_div)
+        # 与 SET_ACQUISITION 相同：十格窗口按 ADC 样点取整，10 ns/div
+        # 的 6.5 点会变成 7 点，不能拿理想 100 ns 去卡 5%。
+        capture = max(1, int(ceil(ADC_SAMPLE_RATE_HZ * window)))
+        expected = capture / float(ADC_SAMPLE_RATE_HZ)
         # 桶大小取整会产生很小的误差，5% 足以区分相邻时基的旧帧。
         return abs(actual - expected) <= expected * 0.05
 

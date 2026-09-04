@@ -67,8 +67,8 @@ class PlotWidget(QtWidgets.QWidget):
             pen=pg.mkPen("#ffb020", width=1.5), name="CH2",
         )
 
-        # 保留包络边界对象供诊断使用，但标准示波器视图默认只显示中心线。
-        # Min/Max 不是两条独立波形，不能直接作为主波形叠加绘制。
+        # 包络帧里的 Min/Max 只用来重建一条中心线。示波器主视图始终是
+        # 每通道一条描迹，不再把峰峰值画成填充区域。
         self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1))
@@ -81,6 +81,7 @@ class PlotWidget(QtWidgets.QWidget):
         )
         self.plot.addItem(self.fill_a)
         self.plot.addItem(self.fill_b)
+        self._clear_envelope()
 
         self._fft = False
         self._seconds_per_div = 0.001
@@ -228,7 +229,8 @@ class PlotWidget(QtWidgets.QWidget):
         """显示 RAW32/DECIMATED32/ENVELOPE64 帧。
 
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
-        ENVELOPE 是连续流且没有触发索引，时间从当前帧起点开始。
+        ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
+        主视图始终是每通道一条描迹，不用 Min/Max 填色带。
         """
         self._last_frame = frame
         sample_format = frame.header.sample_format
@@ -281,8 +283,8 @@ class PlotWidget(QtWidgets.QWidget):
         max_a = values["max_a"].astype(np.float64)
         min_b = values["min_b"].astype(np.float64)
         max_b = values["max_b"].astype(np.float64)
-        # 1:1 桶的 min==max，就是 ADC 样本；长时基 Min/Max 必须画成峰峰值
-        # 色带，不能取中心线，否则 4MHz 会被平均成一条直流。
+        # 示波器主视图是一条描迹。1:1 时 min==max，就是 ADC 样本；
+        # 长时基桶的 Min/Max 取中点，仍画成线，不再填色带。
         window_seconds = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
         visible_count = max(1, int(np.ceil(
             window_seconds * float(frame.header.sample_rate_hz)
@@ -292,28 +294,20 @@ class PlotWidget(QtWidgets.QWidget):
             min_b, max_b = min_b[:visible_count], max_b[:visible_count]
         trace_a = (min_a + max_a) / 2.0
         trace_b = (min_b + max_b) / 2.0
-        peak_detect = bool(
+        one_to_one = not (
             np.any((max_a - min_a) > 1.0) or np.any((max_b - min_b) > 1.0)
         )
         sample_rate = float(frame.header.sample_rate_hz)
-        if not peak_detect and sample_rate >= 1.0e6:
-            # 短时基原样波形：保留 4MHz 峰谷，不做中值/平滑。
-            pass
-        else:
+        if not one_to_one or sample_rate < 1.0e6:
             trace_a = median_filter_3(trace_a)
             trace_b = median_filter_3(trace_b)
-        x = np.arange(len(trace_a), dtype=np.float64) / sample_rate
-        self._has_trigger_alignment = False
+        trigger_index = self._clamped_trigger_index(frame, len(trace_a))
+        x = (np.arange(len(trace_a), dtype=np.float64) - trigger_index) / sample_rate
+        self._has_trigger_alignment = trigger_index > 0
         self._set_time_range()
+        self._clear_envelope()
         self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
         self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
-        if peak_detect:
-            self.min_a.setData(x, self._to_divisions(codes_to_voltage(min_a), 1))
-            self.max_a.setData(x, self._to_divisions(codes_to_voltage(max_a), 1))
-            self.min_b.setData(x, self._to_divisions(codes_to_voltage(min_b), 2))
-            self.max_b.setData(x, self._to_divisions(codes_to_voltage(max_b), 2))
-        else:
-            self._clear_envelope()
         self.trigger_line.setValue(0.0)
         self.plot.setLabel("bottom", "时间", units="s")
         self.plot.setLabel("left", "垂直分度", units="div")
@@ -400,26 +394,10 @@ class PlotWidget(QtWidgets.QWidget):
             return
         self.curve_a.setVisible(ch1_visible)
         self.curve_b.setVisible(ch2_visible)
-        env_visible = self._last_frame is not None and (
-            self._last_frame.header.sample_format in (
-                SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32,
-            )
-        )
-        peak_a = self._curve_has_samples(self.min_a)
-        peak_b = self._curve_has_samples(self.min_b)
-        self.min_a.setVisible(ch1_visible and peak_a)
-        self.max_a.setVisible(ch1_visible and peak_a)
-        self.fill_a.setVisible(ch1_visible and peak_a)
-        self.min_b.setVisible(ch2_visible and peak_b)
-        self.max_b.setVisible(ch2_visible and peak_b)
-        self.fill_b.setVisible(ch2_visible and peak_b)
-        # 包络帧从触发沿开始，x=0 就是触发位置（屏幕左缘）。
+        for curve in (self.min_a, self.max_a, self.min_b, self.max_b,
+                      self.fill_a, self.fill_b):
+            curve.setVisible(False)
         self.trigger_line.setVisible(True)
-
-    @staticmethod
-    def _curve_has_samples(curve: pg.PlotDataItem) -> bool:
-        data = curve.getData()
-        return bool(data is not None and data[0] is not None and len(data[0]) > 0)
 
     @staticmethod
     def _validate_channel(channel: int) -> int:

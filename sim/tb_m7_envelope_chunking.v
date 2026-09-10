@@ -17,6 +17,7 @@ module tb_m7_envelope_chunking;
     wire [7:0] app_payload_data;
     wire app_payload_valid;
     wire [15:0] app_flags;
+    wire [15:0] app_chunk_index;
 
     reg [31:0] point_index = 32'd0;
     integer timeout = 0;
@@ -26,6 +27,8 @@ module tb_m7_envelope_chunking;
     integer second_len = 0;
     integer first_offset = -1;
     integer second_offset = -1;
+    integer first_chunk_index = -1;
+    integer second_chunk_index = -1;
 
     wire [207:0] envelope_descriptor = {
         32'd1, 16'd0, 8'h02, 8'h03, 32'd0, 32'd65_000_000,
@@ -35,6 +38,7 @@ module tb_m7_envelope_chunking;
     always #4 clk = ~clk;
 
     network_data_scheduler_m7 dut (
+        .envelope_discard(1'b0),
         .clk(clk), .reset(reset),
         .raw_command_valid(1'b0), .raw_command_ready(),
         .raw_descriptor(208'd0), .raw_frame_start_sample(32'd0),
@@ -50,7 +54,7 @@ module tb_m7_envelope_chunking;
         .measurement_valid(1'b0), .measurement_ready(),
         .measurement_descriptor(208'd0), .measurement_data(368'd0),
         .app_request_valid(app_request_valid), .app_request_ready(1'b1),
-        .app_descriptor(), .app_chunk_index(),
+        .app_descriptor(), .app_chunk_index(app_chunk_index),
         .app_chunk_offset(app_chunk_offset), .app_flags(app_flags),
         .app_payload_length(app_payload_length),
         .app_payload_data(app_payload_data),
@@ -78,12 +82,31 @@ module tb_m7_envelope_chunking;
             if (chunk_count == 0) begin
                 first_len = app_payload_length;
                 first_offset = app_chunk_offset;
+                first_chunk_index = app_chunk_index;
             end else if (chunk_count == 1) begin
                 second_len = app_payload_length;
                 second_offset = app_chunk_offset;
+                second_chunk_index = app_chunk_index;
             end
         end
         if (app_payload_valid) begin
+            case (payload_bytes % 8)
+                0: if (app_payload_data !== ((payload_bytes / 8) & 8'hFF))
+                       $fatal(1, "envelope byte mismatch point=%0d byte=0 got=%02x",
+                              payload_bytes / 8, app_payload_data);
+                1: if (app_payload_data !== (((payload_bytes / 8) >> 8) & 8'hFF))
+                       $fatal(1, "envelope byte mismatch point=%0d byte=1 got=%02x",
+                              payload_bytes / 8, app_payload_data);
+                2: if (app_payload_data !== (((payload_bytes / 8) >> 16) & 8'hFF))
+                       $fatal(1, "envelope byte mismatch point=%0d byte=2 got=%02x",
+                              payload_bytes / 8, app_payload_data);
+                3: if (app_payload_data !== (((payload_bytes / 8) >> 24) & 8'hFF))
+                       $fatal(1, "envelope byte mismatch point=%0d byte=3 got=%02x",
+                              payload_bytes / 8, app_payload_data);
+                default: if (app_payload_data !== 8'd0)
+                       $fatal(1, "envelope byte mismatch point=%0d byte=%0d got=%02x",
+                              payload_bytes / 8, payload_bytes % 8, app_payload_data);
+            endcase
             payload_bytes = payload_bytes + 1;
             if ((payload_bytes == first_len) && (chunk_count == 0))
                 chunk_count = 1;
@@ -111,6 +134,10 @@ module tb_m7_envelope_chunking;
         if (second_offset != FIRST_CHUNK_BYTES)
             $fatal(1, "second envelope chunk offset %0d, expected %0d",
                    second_offset, FIRST_CHUNK_BYTES);
+        if (first_chunk_index != 0)
+            $fatal(1, "first envelope chunk index %0d, expected 0", first_chunk_index);
+        if (second_chunk_index != 1)
+            $fatal(1, "second envelope chunk index %0d, expected 1", second_chunk_index);
         if (payload_bytes != (FIRST_CHUNK_BYTES + SECOND_CHUNK_BYTES))
             $fatal(1, "envelope payload bytes %0d", payload_bytes);
         $display("M7_ENVELOPE_CHUNKING_SIM_PASS points=%0d chunks=2 bytes=%0d",

@@ -57,6 +57,7 @@ module signal_processing_m6 #(
     // 采样本身自然决定下一帧起始时间。短时基 1:1 上传时必须先等边沿
     // 触发，否则 4MHz 每一帧相位随机，上位机无法稳定显示波形。
     reg [31:0] envelope_sample_count;
+    reg [31:0] envelope_input_point_index;
     reg [31:0] envelope_holdoff_count;
     reg        envelope_collecting;
     reg        envelope_need_trigger;
@@ -74,6 +75,7 @@ module signal_processing_m6 #(
     wire [11:0] env_min_b;
     wire [11:0] env_max_b;
     wire [31:0] env_bucket_samples;
+    wire env_bucket_complete;
 
     wire [11:0] decimated_a;
     wire [11:0] decimated_b;
@@ -105,8 +107,8 @@ module signal_processing_m6 #(
     wire active_otr_a = channel_mask[0] ? otr_a : 1'b0;
     wire active_otr_b = channel_mask[1] ? otr_b : 1'b0;
 
-    wire envelope_path_enable = processing_started &&
-        (envelope_enable || (data_mode == 2'd1));
+    // 模式选择不等于运行命令；关闭使能后必须停止产生新包络。
+    wire envelope_path_enable = processing_started && envelope_enable;
     wire processing_reset_pulse = config_update || config_applied;
     assign processing_ready = processing_started && !config_busy;
 
@@ -128,13 +130,19 @@ module signal_processing_m6 #(
         .upper_level    ()
     );
 
+    wire envelope_start = envelope_path_enable && envelope_need_trigger &&
+        (envelope_holdoff_count == 32'd0) && sample_valid &&
+        (envelope_trigger_now || (envelope_wait_count >= frame_interval_samples));
     wire envelope_sample_enable = envelope_path_enable &&
-        envelope_collecting && (envelope_holdoff_count == 32'd0);
+        (envelope_collecting || envelope_start) && (envelope_holdoff_count == 32'd0);
     wire envelope_sample_valid = sample_valid && envelope_sample_enable;
-    wire envelope_frame_last = envelope_valid &&
+    wire envelope_output_frame_last = envelope_valid &&
         ((display_points == 32'd0) ||
          (envelope_point_index == display_points - 1'b1));
     wire [31:0] envelope_next_sample_count = envelope_sample_count + 1'b1;
+    wire envelope_input_frame_last = env_bucket_complete &&
+        ((display_points == 32'd0) ||
+         (envelope_input_point_index == display_points - 1'b1));
 
     wire measurement_sample_enable = processing_started &&
         measurement_collecting && (measurement_holdoff_count == 32'd0);
@@ -173,6 +181,7 @@ module signal_processing_m6 #(
             envelope_frame_id    <= 32'd0;
             envelope_point_index <= 32'd0;
             envelope_sample_count <= 32'd0;
+            envelope_input_point_index <= 32'd0;
             envelope_holdoff_count <= 32'd0;
             envelope_collecting  <= !envelope_trigger_enable;
             envelope_need_trigger <= envelope_trigger_enable;
@@ -185,10 +194,13 @@ module signal_processing_m6 #(
             envelope_frame_done <= 1'b0;
             if (config_update) processing_started <= 1'b0;
             if (config_applied) processing_started <= 1'b1;
+            // 配置切换可中断半帧，下一次采集不能复用该帧号。
+            if (config_update) envelope_frame_id <= envelope_frame_id + 1'b1;
 
             if (processing_reset_pulse) begin
                 envelope_point_index <= 32'd0;
                 envelope_sample_count <= 32'd0;
+                envelope_input_point_index <= 32'd0;
                 envelope_holdoff_count <= 32'd0;
                 envelope_collecting  <= !envelope_trigger_enable;
                 envelope_need_trigger <= envelope_trigger_enable;
@@ -205,19 +217,18 @@ module signal_processing_m6 #(
                     sample_valid)
                     envelope_wait_count <= envelope_wait_count + 1'b1;
 
-                if (envelope_need_trigger && (envelope_holdoff_count == 32'd0) &&
-                    (envelope_trigger_now ||
-                     (envelope_wait_count >= frame_interval_samples))) begin
+                if (envelope_start) begin
                     envelope_collecting   <= 1'b1;
                     envelope_need_trigger <= 1'b0;
                     envelope_wait_count   <= 32'd0;
-                    envelope_sample_count <= 32'd0;
-                    envelope_point_index  <= 32'd0;
                 end
 
                 if (envelope_sample_valid) begin
-                    if (envelope_frame_last) begin
+                    // 在接收最后一个输入样点时结束窗口。输出流水线仍有
+                    // 最后一个包络点，交给下面的输出计数独立退休。
+                    if (envelope_input_frame_last) begin
                         envelope_sample_count <= 32'd0;
+                        envelope_input_point_index <= 32'd0;
                         envelope_collecting   <= !envelope_trigger_enable;
                         envelope_need_trigger <= envelope_trigger_enable;
                         envelope_wait_count   <= 32'd0;
@@ -228,14 +239,26 @@ module signal_processing_m6 #(
                     end else if (envelope_sample_count != 32'hFFFF_FFFF) begin
                         envelope_sample_count <= envelope_next_sample_count;
                     end
+                    if (env_bucket_complete && !envelope_input_frame_last)
+                        envelope_input_point_index <= envelope_input_point_index + 1'b1;
                 end
 
-                if (envelope_frame_last) begin
+                if (envelope_output_frame_last) begin
                     envelope_point_index <= 32'd0;
                     envelope_frame_id    <= envelope_frame_id + 1'b1;
                     envelope_frame_done  <= 1'b1;
                 end else if (envelope_valid) begin
                     envelope_point_index <= envelope_point_index + 1'b1;
+                end
+
+                if (!envelope_path_enable) begin
+                    envelope_sample_count <= 32'd0;
+                    envelope_input_point_index <= 32'd0;
+                    envelope_point_index <= 32'd0;
+                    envelope_holdoff_count <= 32'd0;
+                    envelope_collecting <= !envelope_trigger_enable;
+                    envelope_need_trigger <= envelope_trigger_enable;
+                    envelope_wait_count <= 32'd0;
                 end
 
                 if ((measurement_holdoff_count != 32'd0) && sample_valid)
@@ -271,7 +294,7 @@ module signal_processing_m6 #(
         .clk               (clk),
         .reset             (reset),
         .config_update     (processing_reset_pulse),
-        .enable            (envelope_path_enable && envelope_collecting),
+        .enable            (envelope_path_enable),
         .bucket_size       (bucket_size),
         .sample_valid      (envelope_sample_valid),
         .code_a            (active_code_a),
@@ -281,7 +304,8 @@ module signal_processing_m6 #(
         .max_a             (env_max_a),
         .min_b             (env_min_b),
         .max_b             (env_max_b),
-        .samples_in_bucket (env_bucket_samples)
+        .samples_in_bucket (env_bucket_samples),
+        .bucket_complete   (env_bucket_complete)
     );
 
     assign envelope_data = {

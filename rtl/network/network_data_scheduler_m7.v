@@ -25,6 +25,7 @@ module network_data_scheduler_m7 (
     output wire         raw_word_ready,
 
     input  wire         envelope_valid,
+    input  wire         envelope_discard,
     output wire         envelope_ready,
     input  wire [207:0] envelope_descriptor,
     input  wire [31:0]  envelope_point_index,
@@ -79,6 +80,7 @@ module network_data_scheduler_m7 (
 
     reg [207:0] env_descriptor_latched;
     reg [31:0] env_point_index_latched;
+    reg [15:0] env_chunk_index_current;
     reg [10:0] env_byte_index;
     reg [10:0] env_payload_bytes;
     reg [8:0]  env_point_count;
@@ -88,8 +90,6 @@ module network_data_scheduler_m7 (
     (* ram_style = "block" *) reg [63:0] env_point_mem [0:ENV_MEM_DEPTH-1];
     reg [63:0] env_mem_dout;
     reg [63:0] env_current_word;
-    wire env_wr_en = (envelope_valid && envelope_ready);
-    wire [8:0] env_wr_addr = (state == S_IDLE) ? 9'd0 : env_point_count;
     wire env_single_channel = (env_descriptor_latched[151:144] != 8'h03);
     wire env_channel_a = (env_descriptor_latched[151:144] == 8'h01);
     wire [4:0] env_bytes_per_point = env_single_channel ? 5'd4 : 5'd8;
@@ -106,10 +106,17 @@ module network_data_scheduler_m7 (
     wire env_in_single = (env_in_mask != 8'h03);
     wire [4:0] env_in_bpp = env_in_single ? 5'd4 : 5'd8;
     wire [31:0] env_in_total = envelope_descriptor[79:48];
+    wire env_in_valid = (env_in_total != 32'd0) &&
+                        (envelope_point_index < env_in_total);
+    wire env_in_contiguous = (envelope_descriptor == env_descriptor_latched) &&
+        (envelope_point_index == env_point_index_latched + {23'd0, env_point_count});
     wire env_in_last = (env_in_total == 32'd0) ||
                        (envelope_point_index >= (env_in_total - 32'd1));
     wire [10:0] env_next_bytes = env_payload_bytes + {6'd0, env_in_bpp};
     wire env_in_packet_end = env_in_last || (env_next_bytes >= ENV_MAX_BYTES);
+    wire env_wr_en = envelope_valid && envelope_ready && env_in_valid;
+    wire [8:0] env_wr_addr = ((state == S_IDLE) || !env_in_contiguous)
+        ? 9'd0 : env_point_count;
 
     reg [207:0] meas_descriptor_latched;
     reg [367:0] meas_data_latched;
@@ -140,9 +147,9 @@ module network_data_scheduler_m7 (
                         (state == S_RAW_PREPARE) || (state == S_RAW_PAYLOAD) ||
                         (raw_bytes_remaining != 32'd0);
 
-    assign envelope_ready = ((state == S_IDLE) && !raw_command_valid &&
-                             !measurement_valid) ||
-                            (state == S_ENV_ACCUM);
+    assign envelope_ready = !envelope_discard &&
+        (((state == S_IDLE) && !raw_command_valid && !measurement_valid) ||
+         (state == S_ENV_ACCUM));
     assign measurement_ready = (state == S_IDLE) && !raw_command_valid;
 
     assign raw_bridge_request_valid = (state == S_RAW_PREPARE) &&
@@ -153,7 +160,7 @@ module network_data_scheduler_m7 (
     assign raw_bridge_single_channel = raw_single_channel;
 
     assign app_request_valid = ((state == S_RAW_PREPARE) && !app_requested) ||
-                               (state == S_ENV_PREPARE) ||
+                               ((state == S_ENV_PREPARE) && !envelope_discard) ||
                                (state == S_MEAS_PREPARE);
     assign app_descriptor = ((state == S_RAW_PREPARE) ||
                              (state == S_RAW_PAYLOAD)) ? raw_descriptor_latched :
@@ -164,7 +171,7 @@ module network_data_scheduler_m7 (
                               (state == S_RAW_PAYLOAD)) ? raw_chunk_index_current :
                              ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
                               (state == S_ENV_PAYLOAD)) ?
-                                 env_point_index_latched[15:0] : 16'd0;
+                                 env_chunk_index_current : 16'd0;
     assign app_chunk_offset = ((state == S_RAW_PREPARE) ||
                                (state == S_RAW_PAYLOAD)) ? raw_offset_current :
                               ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
@@ -245,6 +252,7 @@ module network_data_scheduler_m7 (
             raw_divider_start           <= 1'b0;
             env_descriptor_latched      <= 208'd0;
             env_point_index_latched     <= 32'd0;
+            env_chunk_index_current     <= 16'd0;
             env_byte_index              <= 11'd0;
             env_payload_bytes           <= 11'd0;
             env_point_count             <= 9'd0;
@@ -257,7 +265,12 @@ module network_data_scheduler_m7 (
             meas_byte_index             <= 6'd0;
         end else begin
             raw_divider_start <= 1'b0;
-            case (state)
+            // FIFO 冲刷时放弃尚未提交的半包；已经提交给封包器的完整包
+            // 继续发送，避免封包器永远等待余下负载。
+            if (envelope_discard &&
+                ((state == S_ENV_ACCUM) || (state == S_ENV_PREPARE))) begin
+                state <= S_IDLE;
+            end else case (state)
                 S_IDLE: begin
                     if (raw_command_valid && raw_command_ready) begin
                         raw_descriptor_latched  <= raw_descriptor;
@@ -277,9 +290,16 @@ module network_data_scheduler_m7 (
                         meas_data_latched       <= measurement_data;
                         meas_byte_index         <= 6'd0;
                         state                   <= S_MEAS_PREPARE;
-                    end else if (envelope_valid && envelope_ready) begin
+                    end else if (envelope_valid && envelope_ready && env_in_valid) begin
                         env_descriptor_latched  <= envelope_descriptor;
                         env_point_index_latched <= envelope_point_index;
+                        // 发送完一个分块后状态会回到空闲；如果下一个点仍
+                        // 属于同一帧且索引连续，保留已经递增的分块序号。
+                        // 换帧或出现断点时从零重新编号。
+                        if (!((envelope_descriptor == env_descriptor_latched) &&
+                              (envelope_point_index ==
+                               env_point_index_latched + {23'd0, env_point_count})))
+                            env_chunk_index_current <= 16'd0;
                         env_payload_bytes       <= {6'd0, env_in_bpp};
                         env_point_count         <= 9'd1;
                         env_last_chunk          <= env_in_last;
@@ -352,13 +372,30 @@ module network_data_scheduler_m7 (
                 end
 
                 S_ENV_ACCUM: begin
-                    if (envelope_valid) begin
-                        env_payload_bytes <= env_next_bytes;
-                        env_point_count   <= env_point_count + 1'b1;
-                        env_last_chunk    <= env_in_last;
-                        if (env_in_packet_end) begin
+                    if (envelope_valid && envelope_ready) begin
+                        if (!env_in_valid) begin
+                            state <= S_IDLE;
+                        end else if (!env_in_contiguous) begin
+                            // 丢点、重复索引或换帧后从当前点重新起包，
+                            // 不能把不连续的样点伪装成连续负载。
+                            env_descriptor_latched <= envelope_descriptor;
+                            env_point_index_latched <= envelope_point_index;
+                            env_chunk_index_current <= 16'd0;
+                            env_payload_bytes <= {6'd0, env_in_bpp};
+                            env_point_count <= 9'd1;
+                            env_last_chunk <= env_in_last;
+                            env_byte_index <= 11'd0;
                             env_rd_addr <= 9'd0;
-                            state       <= S_ENV_PREPARE;
+                            env_current_word <= envelope_data;
+                            if (env_in_last) state <= S_ENV_PREPARE;
+                        end else begin
+                            env_payload_bytes <= env_next_bytes;
+                            env_point_count   <= env_point_count + 1'b1;
+                            env_last_chunk    <= env_in_last;
+                            if (env_in_packet_end) begin
+                                env_rd_addr <= 9'd0;
+                                state       <= S_ENV_PREPARE;
+                            end
                         end
                     end
                 end
@@ -383,6 +420,8 @@ module network_data_scheduler_m7 (
                 S_ENV_PAYLOAD: begin
                     if (app_payload_ready) begin
                         if (env_byte_index == env_last_byte) begin
+                            if (!env_last_chunk)
+                                env_chunk_index_current <= env_chunk_index_current + 1'b1;
                             state <= S_IDLE;
                         end else begin
                             env_byte_index <= env_byte_index + 1'b1;

@@ -62,6 +62,16 @@ class UdpReassemblyTest(unittest.TestCase):
         self.assertEqual(completed.payload, source)
         self.assertEqual(completed.header.total_samples, 200)
 
+    def test_overlapping_chunks_do_not_hide_a_gap(self) -> None:
+        source = bytes(range(16))
+        reassembler = FrameReassembler()
+        self.assertIsNone(reassembler.ingest(packet(source[:8], 0, len(source))))
+        # 两个重叠分块的字节数虽然已经达到总长，尾部仍然缺失。
+        self.assertIsNone(reassembler.ingest(packet(source[4:12], 4, len(source))))
+        completed = reassembler.ingest(packet(source[12:], 12, len(source)))
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed.payload, source)
+
 
 if __name__ == "__main__":
     unittest.main()

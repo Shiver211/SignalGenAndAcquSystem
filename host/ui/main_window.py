@@ -397,6 +397,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._continuous_running = False
         self.serial_link.send_command(Command.ENVELOPE_ENABLE, b"\x00")
         self.serial_link.send_command(Command.STOP)
+        self.udp_receiver.discard_pending()
         self.statusBar().showMessage("已停止", 2000)
 
     def _single_acquisition(self) -> None:

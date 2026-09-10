@@ -24,15 +24,22 @@ class _FrameState:
     created: float
     updated: float
     segments: dict[int, bytes] = field(default_factory=dict)
+    received_bytes: int = 0
     last_request: float = 0.0
 
     def add(self, offset: int, payload: bytes) -> bool:
         if offset < 0 or offset + len(payload) > self.total_bytes:
             raise DatagramError("分块范围超出完整帧")
-        duplicate = self.segments.get(offset) == payload
-        if not duplicate:
-            self.segments[offset] = payload
-        return duplicate
+        existing = self.segments.get(offset)
+        if existing == payload:
+            return True
+        if existing is not None:
+            raise DatagramError("同一分块内容不一致")
+        # FPGA 只产生不重叠的固定大小分块；用累计字节数判断完成，
+        # 不在每个报文到达时排序整个帧的分块表。
+        self.segments[offset] = payload
+        self.received_bytes += len(payload)
+        return False
 
     def missing_ranges(self, maximum: int = 1400) -> list[tuple[int, int]]:
         intervals = sorted((start, start + len(data)) for start, data in self.segments.items())
@@ -115,6 +122,10 @@ class FrameReassembler:
         state.updated = now
         if state.add(header.chunk_offset, payload):
             self.duplicate_count += 1
+        if state.received_bytes < state.total_bytes:
+            return None
+        # 正常 FPGA 分块路径无需逐包排序；累计字节达到总长时再检查一次
+        # 间隔，避免重叠分块把带缺口的帧误判为完整帧。
         if state.missing_ranges():
             return None
         del self.frames[key]

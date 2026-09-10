@@ -17,7 +17,7 @@ from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, median_filter_3,
+    codes_to_voltage, fft_spectrum,
 )
 
 
@@ -69,8 +69,7 @@ class PlotWidget(QtWidgets.QWidget):
             pen=pg.mkPen("#ffb020", width=1.5), name="CH2",
         )
 
-        # 包络帧里的 Min/Max 只用来重建一条中心线。示波器主视图始终是
-        # 每通道一条描迹，不再把峰峰值画成填充区域。
+        # 包络帧同时保留每桶的 Min/Max，避免把桶内瞬态压成一个中心点。
         self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
         self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1))
@@ -95,6 +94,7 @@ class PlotWidget(QtWidgets.QWidget):
         }
         self._last_frame: CompletedFrame | None = None
         self._has_trigger_alignment = False
+        self._envelope_active = False
         self._configure_grid()
         self._set_time_range()
         self._apply_visibility()
@@ -232,11 +232,13 @@ class PlotWidget(QtWidgets.QWidget):
 
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
-        主视图始终是每通道一条描迹，不用 Min/Max 填色带。
+        包络帧保留每桶的 Min/Max 范围；原始帧在压缩时保留桶内极值。
         """
         self._last_frame = frame
         sample_format = frame.header.sample_format
         if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
+            # Min/Max 包络没有桶内相位信息，不能伪装成原始波形做 FFT。
+            # 仍显示包络范围，用户切换回时域即可查看。
             self._display_envelope(frame)
             return
         if sample_format not in (SampleFormat.RAW32, SampleFormat.RAW16,
@@ -259,15 +261,15 @@ class PlotWidget(QtWidgets.QWidget):
             self._display_fft(a, b, frame.header.sample_rate_hz)
             return
 
-        step = max(1, len(a) // max(1, int(max_points)))
-        indices = np.arange(len(a), dtype=np.float64)[::step]
-        display_a = median_filter_3(a[::step])
-        display_b = median_filter_3(b[::step])
+        indices, display_a, display_b = self._reduce_raw_for_display(
+            a, b, max_points,
+        )
         trigger_index = self._clamped_trigger_index(frame, len(a))
         x = (indices - trigger_index) / float(frame.header.sample_rate_hz)
         self._has_trigger_alignment = True
         self._set_time_range()
         self._clear_envelope()
+        self._envelope_active = False
         self.curve_a.setData(x, self._to_divisions(display_a, 1))
         self.curve_b.setData(x, self._to_divisions(display_b, 2))
         self.trigger_line.setValue(0.0)
@@ -283,8 +285,7 @@ class PlotWidget(QtWidgets.QWidget):
         max_a = values["max_a"].astype(np.float64)
         min_b = values["min_b"].astype(np.float64)
         max_b = values["max_b"].astype(np.float64)
-        # 示波器主视图是一条描迹。1:1 时 min==max，就是 ADC 样本；
-        # 长时基桶的 Min/Max 取中点，仍画成线，不再填色带。
+        # 包络帧的每个点代表一个时间桶，Min/Max 必须分别绘制。
         window_seconds = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
         visible_count = max(1, int(np.ceil(
             window_seconds * float(frame.header.sample_rate_hz)
@@ -292,22 +293,24 @@ class PlotWidget(QtWidgets.QWidget):
         if visible_count < count:
             min_a, max_a = min_a[:visible_count], max_a[:visible_count]
             min_b, max_b = min_b[:visible_count], max_b[:visible_count]
+        sample_rate = float(frame.header.sample_rate_hz)
         trace_a = (min_a + max_a) / 2.0
         trace_b = (min_b + max_b) / 2.0
-        one_to_one = not (
-            np.any((max_a - min_a) > 1.0) or np.any((max_b - min_b) > 1.0)
-        )
-        sample_rate = float(frame.header.sample_rate_hz)
-        if not one_to_one or sample_rate < 1.0e6:
-            trace_a = median_filter_3(trace_a)
-            trace_b = median_filter_3(trace_b)
         trigger_index = self._clamped_trigger_index(frame, len(trace_a))
         x = (np.arange(len(trace_a), dtype=np.float64) - trigger_index) / sample_rate
         self._has_trigger_alignment = trigger_index > 0
         self._set_time_range()
-        self._clear_envelope()
+        self._envelope_active = True
+        # 中心线保留在主曲线上，便于旧版调用方读取；可视范围由
+        # Min/Max 曲线和填充带表达，不再用中心线替代包络。
         self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
         self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
+        self.min_a.setData(x, self._to_divisions(codes_to_voltage(min_a), 1))
+        self.max_a.setData(x, self._to_divisions(codes_to_voltage(max_a), 1))
+        self.min_b.setData(x, self._to_divisions(codes_to_voltage(min_b), 2))
+        self.max_b.setData(x, self._to_divisions(codes_to_voltage(max_b), 2))
+        self.fill_a.setVisible(True)
+        self.fill_b.setVisible(True)
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
@@ -348,20 +351,49 @@ class PlotWidget(QtWidgets.QWidget):
         return (np.asarray(volts, dtype=np.float64) /
                 settings["volts_per_div"] + settings["position_div"])
 
+    @staticmethod
+    def _reduce_raw_for_display(
+        values_a: np.ndarray, values_b: np.ndarray, max_points: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """降采样时保留每个时间桶的两个通道极值，绝不删除窄脉冲。"""
+        a = np.asarray(values_a, dtype=np.float64)
+        b = np.asarray(values_b, dtype=np.float64)
+        # 双通道 min/max 至少需要四个候选点；正常 UI 上限远大于此值。
+        limit = max(4, int(max_points))
+        if len(a) <= limit:
+            return np.arange(len(a), dtype=np.float64), a, b
+        # 每个桶最多保留 CH1/CH2 的 min/max 四个点，候选点数因此
+        # 不会超过 limit；不再事后均匀裁剪极值点。
+        bucket_count = max(1, limit // 4)
+        edges = np.linspace(0, len(a), bucket_count + 1, dtype=np.int64)
+        selected: set[int] = set()
+        for start, end in zip(edges[:-1], edges[1:]):
+            if end <= start:
+                continue
+            selected.add(int(start + np.argmin(a[start:end])))
+            selected.add(int(start + np.argmax(a[start:end])))
+            selected.add(int(start + np.argmin(b[start:end])))
+            selected.add(int(start + np.argmax(b[start:end])))
+        indices = np.asarray(sorted(selected), dtype=np.int64)
+        return indices.astype(np.float64), a[indices], b[indices]
+
     def _clamped_trigger_index(self, frame: CompletedFrame, count: int) -> int:
         if count <= 0:
             return 0
         return int(np.clip(frame.header.trigger_index, 0, count - 1))
 
     def _redraw_last_frame(self) -> None:
-        if self._last_frame is not None and not self._fft:
+        if self._last_frame is not None:
             self.display_frame(self._last_frame)
 
     def _clear_waveforms(self) -> None:
         for curve in (self.curve_a, self.curve_b, self.min_a, self.max_a,
                       self.min_b, self.max_b):
             curve.clear()
+        self.fill_a.setVisible(False)
+        self.fill_b.setVisible(False)
         self._last_frame = None
+        self._envelope_active = False
         self._has_trigger_alignment = False
         self._set_time_range()
 
@@ -380,7 +412,7 @@ class PlotWidget(QtWidgets.QWidget):
         frame_mask = self._last_frame.header.channel_mask if self._last_frame else 0x03
         ch1_visible = (1 in self._visible_channels) and bool(frame_mask & 0x01)
         ch2_visible = (2 in self._visible_channels) and bool(frame_mask & 0x02)
-        if self._fft:
+        if self._fft and not self._envelope_active:
             self.curve_a.setVisible(ch1_visible)
             self.curve_b.setVisible(ch2_visible)
             for curve in (self.min_a, self.max_a, self.min_b, self.max_b,
@@ -390,9 +422,10 @@ class PlotWidget(QtWidgets.QWidget):
             return
         self.curve_a.setVisible(ch1_visible)
         self.curve_b.setVisible(ch2_visible)
-        for curve in (self.min_a, self.max_a, self.min_b, self.max_b,
-                      self.fill_a, self.fill_b):
-            curve.setVisible(False)
+        for curve in (self.min_a, self.max_a, self.fill_a):
+            curve.setVisible(ch1_visible and self._envelope_active)
+        for curve in (self.min_b, self.max_b, self.fill_b):
+            curve.setVisible(ch2_visible and self._envelope_active)
         self.trigger_line.setVisible(True)
 
     @staticmethod

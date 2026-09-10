@@ -218,8 +218,15 @@ module network_subsystem_m7 #(
     wire envelope_fifo_overflow;
     wire envelope_network_ready;
     wire scheduler_envelope_ready;
+    wire envelope_discard_tx;
     wire envelope_fifo_pop = !envelope_fifo_empty &&
         ((!envelope_network_ready) || scheduler_envelope_ready);
+
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .INIT_SYNC_FF(1),
+        .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(1)) u_envelope_discard_cdc (
+        .src_clk(clk_adc_65m), .src_in(envelope_fifo_reset),
+        .dest_clk(clk_tx_125m), .dest_out(envelope_discard_tx)
+    );
 
     envelope_async_fifo_m7 u_envelope_fifo (
         .reset(envelope_fifo_reset), .wr_clk(clk_adc_65m),
@@ -341,6 +348,7 @@ module network_subsystem_m7 #(
         .raw_word(raw_word), .raw_word_valid(raw_word_valid),
         .raw_word_ready(raw_word_ready),
         .envelope_valid(envelope_network_ready && !envelope_fifo_empty),
+        .envelope_discard(envelope_discard_tx || !envelope_network_ready),
         .envelope_ready(scheduler_envelope_ready),
         .envelope_descriptor(envelope_fifo_data[303:96]),
         .envelope_point_index(envelope_fifo_data[95:64]),

@@ -26,6 +26,7 @@ module tb_m7_raw_chunking;
     always #4 clk = ~clk;
 
     network_data_scheduler_m7 u_dut (
+        .envelope_discard(1'b0),
         .clk(clk), .reset(reset), .raw_command_valid(command_valid),
         .raw_command_ready(command_ready),
         .raw_descriptor({32'd1,16'd0,8'h01,8'h03,32'd0,32'd65_000_000,

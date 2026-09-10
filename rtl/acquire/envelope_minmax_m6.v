@@ -15,7 +15,8 @@ module envelope_minmax_m6 (
     output reg  [11:0] max_a,
     output reg  [11:0] min_b,
     output reg  [11:0] max_b,
-    output reg  [31:0] samples_in_bucket
+    output reg  [31:0] samples_in_bucket,
+    output wire        bucket_complete
 );
 
     reg [31:0] sample_count;
@@ -26,6 +27,8 @@ module envelope_minmax_m6 (
     wire [31:0] active_bucket_size =
         (bucket_size == 32'd0) ? 32'd1 : bucket_size;
     wire bucket_last = sample_count == active_bucket_size - 1'b1;
+    // 输入侧完成脉冲，比寄存后的 envelope_valid 早一拍。
+    assign bucket_complete = enable && sample_valid && bucket_last;
 
     always @(posedge clk) begin
         if (reset || config_update || !enable) begin
@@ -68,4 +71,3 @@ module envelope_minmax_m6 (
     end
 
 endmodule
-

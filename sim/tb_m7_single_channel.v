@@ -37,6 +37,7 @@ module tb_m7_single_channel;
     always #4 clk = ~clk;
 
     network_data_scheduler_m7 dut (
+        .envelope_discard(1'b0),
         .clk(clk), .reset(reset),
         .raw_command_valid(raw_command_valid),
         .raw_command_ready(raw_command_ready),

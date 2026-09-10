@@ -101,10 +101,10 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertTrue(widget.curve_a.isVisible())
             self.assertTrue(widget.curve_b.isVisible())
             self.assertTrue(widget.trigger_line.isVisible())
-            self.assertFalse(widget.min_a.isVisible())
-            self.assertFalse(widget.max_a.isVisible())
-            self.assertFalse(widget.fill_a.isVisible())
-            self.assertFalse(widget.fill_b.isVisible())
+            self.assertTrue(widget.min_a.isVisible())
+            self.assertTrue(widget.max_a.isVisible())
+            self.assertTrue(widget.fill_a.isVisible())
+            self.assertTrue(widget.fill_b.isVisible())
             widget.set_channel_mode("CH2")
             self.assertFalse(widget.min_a.isVisible())
             self.assertFalse(widget.max_a.isVisible())
@@ -134,7 +134,7 @@ class PlotWidgetTest(unittest.TestCase):
         finally:
             widget.close()
 
-    def test_envelope_display_removes_isolated_center_spike(self) -> None:
+    def test_envelope_display_preserves_isolated_center_spike(self) -> None:
         widget = self.make_widget()
         try:
             centers = [0x800, 0x800, 0xF00, 0x800, 0x800]
@@ -150,7 +150,9 @@ class PlotWidgetTest(unittest.TestCase):
             widget.set_timebase(1e-3)
             widget.display_frame(frame)
             y = widget.curve_a.getData()[1]
-            self.assertAlmostEqual(float(y[2]), float(y[1]))
+            self.assertGreater(float(y[2]), float(y[1]))
+            self.assertGreater(float(widget.max_a.getData()[1][2]),
+                               float(widget.max_a.getData()[1][1]))
             self.assertEqual(len(widget.curve_a.getData()[0]), len(y))
         finally:
             widget.close()
@@ -184,11 +186,11 @@ class PlotWidgetTest(unittest.TestCase):
             np.testing.assert_allclose(
                 volts, codes_to_voltage(codes), atol=0.02,
             )
-            self.assertFalse(widget.min_a.isVisible())
+            self.assertTrue(widget.min_a.isVisible())
         finally:
             widget.close()
 
-    def test_ten_khz_envelope_draws_a_line_not_a_filled_region(self) -> None:
+    def test_ten_khz_envelope_draws_a_min_max_region(self) -> None:
         widget = self.make_widget()
         try:
             # 1 ms/div × 10 格 = 10 ms；包络点按 204.8 kHz 相当于
@@ -219,10 +221,10 @@ class PlotWidgetTest(unittest.TestCase):
             frequency = zero_crossing_frequency(volts, env_rate)
             self.assertGreater(frequency, 9.5e3)
             self.assertLess(frequency, 10.5e3)
-            self.assertFalse(widget.min_a.isVisible())
-            self.assertFalse(widget.max_a.isVisible())
-            self.assertFalse(widget.fill_a.isVisible())
-            self.assertFalse(widget.fill_b.isVisible())
+            self.assertTrue(widget.min_a.isVisible())
+            self.assertTrue(widget.max_a.isVisible())
+            self.assertTrue(widget.fill_a.isVisible())
+            self.assertTrue(widget.fill_b.isVisible())
             self.assertTrue(widget.curve_a.isVisible())
         finally:
             widget.close()
@@ -258,6 +260,21 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertEqual(len(widget.curve_a.getData()[0]), 2)
             self.assertEqual(len(widget.curve_b.getData()[0]), 2)
             self.assertFalse(widget.curve_b.isVisible())
+        finally:
+            widget.close()
+
+    def test_large_raw_frame_reduction_keeps_narrow_pulse(self) -> None:
+        widget = self.make_widget()
+        try:
+            codes = np.full(200_000, 2048, dtype=np.uint32)
+            codes[99_999:100_002] = 4095
+            frame = raw_frame(codes, sample_rate=65_000_000)
+            widget.display_frame(frame, max_points=1000)
+            plotted = widget.curve_a.getData()[1]
+            self.assertLessEqual(len(plotted), 1000)
+            self.assertAlmostEqual(float(np.max(plotted)),
+                                   float(codes_to_voltage(np.array([4095]))[0]),
+                                   places=6)
         finally:
             widget.close()
 

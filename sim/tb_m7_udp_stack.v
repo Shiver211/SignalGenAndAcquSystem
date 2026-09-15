@@ -107,7 +107,7 @@ module tb_m7_udp_stack;
     end
 
     initial begin
-        $readmemh("D:/Xilinx/Projects/Signal/sim/vectors/m7_udp_expected.mem", expected);
+        $readmemh("m7_udp_expected.mem", expected);
         repeat (8) @(posedge clk);
         reset = 1'b0;
         @(negedge clk);

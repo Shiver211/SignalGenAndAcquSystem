@@ -2,7 +2,7 @@
 
 ## 运行
 
-推荐直接双击仓库根目录的 `启动上位机.cmd`。首次启动若网卡没有
+推荐直接双击 `scripts/启动上位机.cmd`。首次启动若网卡没有
 `192.168.1.100/24`，启动器会申请一次管理员权限并将它添加为永久辅助
 地址，同时放行仅来自 FPGA `192.168.1.10` 的 UDP `5001` 入站流量；后续
 启动不再需要修改 IP，也不会停止 NI 服务。
@@ -31,8 +31,10 @@ UDP   5001
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
-python -m unittest discover -s host/tests -v
+python -B -m unittest discover -s host/tests -v
 ```
+
+GUI 测试显式使用临时 INI 配置，不读写本机的连接与幅度校准设置。
 
 测试覆盖 UART CRC8/应答解析、后台收发线程、M7 UDP CRC32、真实 RTL
 参考向量、乱序重组、缺块重传、数据格式、波形算法、SQLite BLOB 和 UI

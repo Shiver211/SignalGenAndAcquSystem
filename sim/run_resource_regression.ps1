@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string[]]$TestBenches = @(
         'tb_envelope_async_fifo_m7',
         'tb_signal_processing_m6',
@@ -10,7 +10,7 @@ param(
         'tb_m7_single_channel',
         'tb_m7_udp_stack'
     ),
-    [string]$RunDirectory = (Join-Path $PSScriptRoot '..\tmp\fpga_resource_regression')
+    [string]$RunDirectory = (Join-Path $PSScriptRoot '..\build\sim\resource_regression')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +19,9 @@ $vivadoBin = Split-Path -Parent (Get-Command xvlog.bat -ErrorAction Stop).Source
 $xpmRoot = Join-Path (Split-Path -Parent $vivadoBin) 'data\ip\xpm'
 $runDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RunDirectory)
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+# 与 Vivado 仿真一致：向量和结果都从本次仿真的工作目录读写。
+Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'vectors') -Filter '*.mem' -File |
+    Copy-Item -Destination $runDir -Force
 
 # 独立仿真目录，直接编译当前 RTL；不依赖工程中的旧仿真快照。
 $compileProject = Join-Path $runDir 'sources.prj'
@@ -73,7 +76,7 @@ try {
     }
     if ($TestBenches -contains 'tb_signal_processing_m6') {
         & python -X utf8 (Join-Path $PSScriptRoot 'm6_reference.py') verify `
-            (Join-Path $projectRoot 'tmp\m6_processing_results.csv')
+            (Join-Path $runDir 'm6_processing_results.csv')
         if ($LASTEXITCODE -ne 0) { throw '包络和测量结果未通过 Python 参考校验。' }
     }
     Write-Output "资源优化回归通过，共 $($TestBenches.Count) 项。日志：$runDir"

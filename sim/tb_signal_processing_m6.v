@@ -98,12 +98,12 @@ module tb_signal_processing_m6;
     end
 
     initial begin
-        $readmemh("D:/Xilinx/Projects/Signal/sim/vectors/m6_input.mem", input_memory);
-        $readmemh("D:/Xilinx/Projects/Signal/sim/vectors/m6_envelope_expected.mem",
+        $readmemh("m6_input.mem", input_memory);
+        $readmemh("m6_envelope_expected.mem",
                   envelope_expected);
-        $readmemh("D:/Xilinx/Projects/Signal/sim/vectors/m6_measurement_expected.mem",
+        $readmemh("m6_measurement_expected.mem",
                   measurement_expected);
-        result_file = $fopen("D:/Xilinx/Projects/Signal/tmp/m6_processing_results.csv", "w");
+        result_file = $fopen("m6_processing_results.csv", "w");
         if (result_file == 0) $fatal(1, "cannot open M6 result file");
 
         repeat (8) @(posedge clk);

@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtCore, QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
-from host.ui.main_window import MainWindow
+from host.tests.window_helpers import create_window
 
 
 def frame(sample_format: int, payload: bytes, channel_mask: int = 3) -> CompletedFrame:
@@ -31,7 +31,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
 
     def test_measurement_does_not_replace_current_waveform(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            window = MainWindow(Path(directory) / "selection.db")
+            window = create_window(Path(directory) / "selection.db")
             window.timebase_combo.setCurrentText("1 ms/div")
             envelope = frame(SampleFormat.ENVELOPE64, struct.pack("<HHHH", 1, 2, 3, 4))
             measurement = frame(
@@ -46,7 +46,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
 
     def test_measurement_hides_inactive_channel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            window = MainWindow(Path(directory) / "single-measurement.db")
+            window = create_window(Path(directory) / "single-measurement.db")
             measurement = frame(
                 SampleFormat.MEASUREMENT_V1,
                 struct.pack("<HHHHIIHHIIIIIIBB", *([0] * 16)),
@@ -68,7 +68,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
             settings = QtCore.QSettings(
                 str(Path(directory) / "cal.ini"), QtCore.QSettings.IniFormat,
             )
-            window = MainWindow(Path(directory) / "cal.db", settings=settings)
+            window = create_window(Path(directory) / "cal.db", settings=settings)
             measurement = frame(
                 SampleFormat.MEASUREMENT_V1,
                 struct.pack(
@@ -89,7 +89,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
 
     def test_stale_envelope_from_previous_timebase_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            window = MainWindow(Path(directory) / "stale-envelope.db")
+            window = create_window(Path(directory) / "stale-envelope.db")
             window.timebase_combo.setCurrentText("2 ms/div")
             payload = struct.pack("<" + "H" * (1024 * 4), *([0x800] * (1024 * 4)))
             stale = CompletedFrame(
@@ -114,7 +114,7 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
 
     def test_timebase_change_redraws_old_envelope_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            window = MainWindow(Path(directory) / "timebase-clear.db")
+            window = create_window(Path(directory) / "timebase-clear.db")
             window.timebase_combo.setCurrentText("1 ms/div")
             payload = struct.pack(
                 "<" + "H" * 400,

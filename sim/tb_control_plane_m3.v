@@ -365,9 +365,9 @@ module tb_control_plane_m3;
             $display("[PASS] acquisition shadow write stayed inactive");
         end
 
-        // 处理参数提交时，把采集和处理两组影子寄存器作为一个 167bit 快照跨域。
+        // 处理参数提交时，把采集和处理两组影子寄存器作为一个 169bit 快照跨域。
         clear_request_payload();
-        request_payload[0  * 8 +: 8]  = 8'd2;
+        request_payload[0  * 8 +: 8]  = 8'd1;
         request_payload[1  * 8 +: 32] = 32'd64;
         request_payload[5  * 8 +: 32] = 32'd2_048;
         request_payload[9  * 8 +: 32] = 32'd25_000;
@@ -381,7 +381,7 @@ module tb_control_plane_m3;
             32'd25_000,
             32'd2_048,
             32'd64,
-            2'd2,
+            2'd1,
             10'd250,
             32'd200_000,
             1'b1,
@@ -397,6 +397,20 @@ module tb_control_plane_m3;
             failures = failures + 1;
         end else begin
             $display("[PASS] atomic 169-bit ADC config CDC");
+        end
+
+        // 已移除的 DECIMATED 模式必须报错，不能修改当前配置或影子寄存器。
+        request_payload[0 * 8 +: 8] = 8'd2;
+        send_request(8'h03, 8'd14, request_payload, 1'b0);
+        expect_response(8'h03, 8'h03);
+        if ((adc_config_active !== expected_adc_config) ||
+            (adc_config_apply_count !== 16'd1) ||
+            (config_sequence !== 16'd1) ||
+            (u_dut.u_reg_file.data_mode_shadow !== 2'd1)) begin
+            $display("[FAIL] unsupported DECIMATED mode changed configuration");
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] unsupported DECIMATED mode rejected atomically");
         end
 
         clear_request_payload();

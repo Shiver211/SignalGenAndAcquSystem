@@ -1,4 +1,4 @@
-"""生成 M6 共用测试向量，并用 Numpy 检查 HDL 输出和抽取频谱。"""
+"""生成 M6 共用测试向量，校验当前包络与测量通路的 HDL 输出。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ SAMPLE_RATE = 1024
 SAMPLE_COUNT = 1024
 BUCKET_SIZE = 32
 WINDOW_SAMPLES = 512
-DECIMATION = 8
 
 
 def build_vectors() -> list[tuple[int, int, int, int]]:
@@ -51,60 +50,6 @@ def envelope_reference(
         b = [sample[1] for sample in bucket]
         packed = min(a) | (max(a) << 16) | (min(b) << 32) | (max(b) << 48)
         result.append(packed)
-    return result
-
-
-def cic_reference(
-    vectors: list[tuple[int, int, int, int]],
-) -> list[int]:
-    int_a = [0, 0, 0]
-    int_b = [0, 0, 0]
-    comb_a = [0, 0, 0]
-    comb_b = [0, 0, 0]
-    otr_a = False
-    otr_b = False
-    result: list[int] = []
-    shift = 3 * int(math.log2(DECIMATION))
-
-    for index, (code_a, code_b, sample_otr_a, sample_otr_b) in enumerate(vectors):
-        centered_a = code_a - 2048
-        centered_b = code_b - 2048
-        int_a[0] += centered_a
-        int_a[1] += int_a[0]
-        int_a[2] += int_a[1]
-        int_b[0] += centered_b
-        int_b[1] += int_b[0]
-        int_b[2] += int_b[1]
-        otr_a |= bool(sample_otr_a)
-        otr_b |= bool(sample_otr_b)
-
-        if index % DECIMATION == DECIMATION - 1:
-            value_a = int_a[2]
-            value_b = int_b[2]
-            next_a = value_a - comb_a[0]
-            next_b = value_b - comb_b[0]
-            comb_a[0] = value_a
-            comb_b[0] = value_b
-            value_a = next_a - comb_a[1]
-            value_b = next_b - comb_b[1]
-            comb_a[1] = next_a
-            comb_b[1] = next_b
-            next_a = value_a - comb_a[2]
-            next_b = value_b - comb_b[2]
-            comb_a[2] = value_a
-            comb_b[2] = value_b
-
-            out_a = min(4095, max(0, (next_a >> shift) + 2048))
-            out_b = min(4095, max(0, (next_b >> shift) + 2048))
-            packed = (
-                out_a
-                | (out_b << 12)
-                | (int(otr_a) << 24)
-                | (int(otr_b) << 25)
-            )
-            result.append(packed)
-            otr_a = False
-            otr_b = False
     return result
 
 
@@ -203,7 +148,6 @@ def generate() -> None:
     ]
     write_mem(VECTOR_DIR / "m6_input.mem", packed_input, 7)
     write_mem(VECTOR_DIR / "m6_envelope_expected.mem", envelope_reference(vectors), 16)
-    write_mem(VECTOR_DIR / "m6_decimated_expected.mem", cic_reference(vectors), 8)
     write_mem(
         VECTOR_DIR / "m6_measurement_expected.mem",
         measurement_reference(vectors),
@@ -212,43 +156,30 @@ def generate() -> None:
     print(
         "M6_PYTHON_REFERENCE_GENERATED "
         f"samples={len(vectors)} envelope={len(vectors) // BUCKET_SIZE} "
-        f"decimated={len(vectors) // DECIMATION} "
         f"measurement={len(vectors) // WINDOW_SAMPLES}"
     )
 
 
 def verify(result_path: Path) -> None:
     vectors = build_vectors()
-    expected_decimated = cic_reference(vectors)
-    observed_decimated: list[int] = []
+    expected = {
+        "E": envelope_reference(vectors),
+        # 与处理链测试的刷新节拍一致：计算完成后才重开测量窗口，
+        # 1024 个输入样本只覆盖第一个完整的 512-sample 测量窗口。
+        "M": measurement_reference(vectors)[:1],
+    }
+    observed: dict[str, list[int]] = {"E": [], "M": []}
     for line in result_path.read_text(encoding="ascii").splitlines():
         fields = line.split(",")
-        if fields[0] == "D":
-            observed_decimated.append(int(fields[2], 16))
+        if fields[0] in observed:
+            observed[fields[0]].append(int(fields[2], 16))
 
-    if observed_decimated != expected_decimated:
-        raise SystemExit("M6 Python 校验失败：HDL 抽取结果与 Python 不一致")
-
-    # 去掉 CIC 启动段，比较 240Hz 分量抽点后混叠到 16Hz 的幅度。
-    input_a = np.asarray([sample[0] - 2048 for sample in vectors], dtype=float)
-    simple = input_a[DECIMATION - 1 :: DECIMATION]
-    cic = np.asarray(
-        [(sample & 0xFFF) - 2048 for sample in observed_decimated], dtype=float
-    )
-    simple = simple[32:]
-    cic = cic[32:]
-    simple_spectrum = np.abs(np.fft.rfft(simple - simple.mean()))
-    cic_spectrum = np.abs(np.fft.rfft(cic - cic.mean()))
-    frequencies = np.fft.rfftfreq(len(cic), d=DECIMATION / SAMPLE_RATE)
-    alias_bin = int(np.argmin(np.abs(frequencies - 16.0)))
-    attenuation = cic_spectrum[alias_bin] / simple_spectrum[alias_bin]
-    if attenuation >= 0.1:
-        raise SystemExit(
-            f"M6 Python 频谱校验失败：16Hz 混叠幅度比 {attenuation:.6f}"
-        )
+    for kind, values in expected.items():
+        if observed[kind] != values:
+            raise SystemExit(f"M6 Python 校验失败：HDL {kind} 结果与 Python 不一致")
     print(
         "M6_PYTHON_REFERENCE_PASS "
-        f"decimated_samples={len(cic)} alias_ratio={attenuation:.6f}"
+        f"envelope={len(observed['E'])} measurement={len(observed['M'])}"
     )
 
 

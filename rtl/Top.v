@@ -77,8 +77,6 @@ module Top (
 
     wire [168:0] adc_control_config;
     wire [15:0] adc_control_apply_count;
-    wire [15:0] adc_control_clear_count;
-    wire adc_control_armed;
     wire adc_control_armed_adc;
     wire capture_done_adc;
 
@@ -88,31 +86,14 @@ module Top (
     wire adc_otr_b_captured;
     wire adc_sample_valid;
     wire ddr_frame_valid;
-    wire [31:0] ddr_frame_id;
     wire [31:0] ddr_frame_start_sample;
-    wire [31:0] ddr_frame_trigger_sample;
-    wire [31:0] ddr_frame_total_samples;
-    wire [31:0] ddr_frame_trigger_index;
-    wire ddr_frame_wrapped;
-    wire ddr_fifo_overflow;
-    wire [31:0] ddr_frame_otr_a_count;
-    wire [31:0] ddr_frame_otr_b_count;
-    wire ddr_frame_analysis_valid;
-    wire dec_frame_valid;
-    wire [31:0] dec_frame_id;
-    wire [31:0] dec_frame_start_sample;
-    wire [31:0] dec_frame_total_samples;
-    wire dec_frame_wrapped;
     wire m6_envelope_valid;
     wire [63:0] m6_envelope_data;
-    wire m6_envelope_frame_done;
-    wire [31:0] m6_envelope_frame_id;
     wire [31:0] m6_envelope_point_index;
     wire m6_measurement_valid;
     wire [367:0] m6_measurement_data;
     wire [207:0] m6_raw_descriptor;
     wire [207:0] m6_envelope_descriptor;
-    wire [207:0] m6_decimated_descriptor;
     wire [207:0] m6_measurement_descriptor;
     wire ddr_ui_clk;
     wire ddr_ui_reset;
@@ -187,15 +168,6 @@ module Top (
         .raw_net_read_sample_ready(raw_net_read_sample_ready),
         .raw_net_read_done_pulse(raw_net_read_done_pulse),
         .raw_net_read_error(raw_net_read_error),
-        .dec_read_request_valid(1'b0),
-        .dec_read_request_ready(),
-        .dec_read_request_start_sample(32'd0),
-        .dec_read_request_sample_count(32'd0),
-        .dec_read_sample_data(),
-        .dec_read_sample_valid(),
-        .dec_read_sample_ready(1'b1),
-        .dec_read_done_pulse(),
-        .dec_read_error(),
         .ddr3_dq            (ddr3_dq),
         .ddr3_dqs_n         (ddr3_dqs_n),
         .ddr3_dqs_p         (ddr3_dqs_p),
@@ -213,31 +185,22 @@ module Top (
         .ddr3_odt           (ddr3_odt),
         .ddr_calibrated     (ddr_calibrated_ui),
         .frame_valid        (ddr_frame_valid),
-        .frame_id           (ddr_frame_id),
+        .frame_id           (),
         .frame_start_sample (ddr_frame_start_sample),
-        .frame_trigger_sample(ddr_frame_trigger_sample),
-        .frame_total_samples(ddr_frame_total_samples),
-        .frame_trigger_index(ddr_frame_trigger_index),
-        .frame_wrapped      (ddr_frame_wrapped),
-        .fifo_overflow      (ddr_fifo_overflow),
-        .frame_otr_a_count  (ddr_frame_otr_a_count),
-        .frame_otr_b_count  (ddr_frame_otr_b_count),
-        .frame_analysis_valid(ddr_frame_analysis_valid),
-        .dec_frame_valid    (dec_frame_valid),
-        .dec_frame_id       (dec_frame_id),
-        .dec_frame_start_sample(dec_frame_start_sample),
-        .dec_frame_total_samples(dec_frame_total_samples),
-        .dec_frame_wrapped  (dec_frame_wrapped),
+        .frame_trigger_sample(),
+        .frame_total_samples(),
+        .frame_trigger_index(),
+        .frame_wrapped      (),
+        .fifo_overflow      (),
         .envelope_valid     (m6_envelope_valid),
         .envelope_data      (m6_envelope_data),
-        .envelope_frame_done(m6_envelope_frame_done),
-        .envelope_frame_id  (m6_envelope_frame_id),
+        .envelope_frame_done(),
+        .envelope_frame_id  (),
         .envelope_point_index(m6_envelope_point_index),
         .measurement_valid  (m6_measurement_valid),
         .measurement_data   (m6_measurement_data),
         .raw_descriptor     (m6_raw_descriptor),
         .envelope_descriptor(m6_envelope_descriptor),
-        .decimated_descriptor(m6_decimated_descriptor),
         .measurement_descriptor(m6_measurement_descriptor)
     );
 
@@ -357,8 +320,8 @@ module Top (
         .offset_code_ch2            (offset_code_ch2),
         .adc_config_active          (adc_control_config),
         .adc_config_apply_count     (adc_control_apply_count),
-        .adc_clear_count            (adc_control_clear_count),
-        .adc_control_armed          (adc_control_armed),
+        .adc_clear_count            (),
+        .adc_control_armed          (),
         .adc_control_armed_adc      (adc_control_armed_adc),
         .protocol_error             (),
         .uart_frame_error           (),

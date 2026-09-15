@@ -90,7 +90,6 @@ module reg_file #(
     localparam [7:0] STATUS_INTERNAL_ERROR = 8'h06;
 
     localparam [31:0] RAW_MAX_SAMPLES = 32'd58_720_256;
-    localparam [31:0] DEC_MAX_SAMPLES = 32'd8_388_608;
 
     localparam [0:0] ST_IDLE     = 1'b0;
     localparam [0:0] ST_WAIT_CFG = 1'b1;
@@ -396,8 +395,6 @@ module reg_file #(
                                         (payload_5 > 8'd1) ||
                                         (acquisition_depth == 32'd0) ||
                                         (acquisition_depth > RAW_MAX_SAMPLES) ||
-                                        ((data_mode_shadow == 2'd2) &&
-                                         (acquisition_depth > DEC_MAX_SAMPLES)) ||
                                         (acquisition_pretrigger > 16'd1000) ||
                                         ((acquisition_channel_mask != 8'd1) &&
                                          (acquisition_channel_mask != 8'd2) &&
@@ -442,12 +439,10 @@ module reg_file #(
 
                                 CMD_SET_PROCESSING: begin
                                     if ((command_len != 8'd14) ||
-                                        (payload_0 > 8'd2) ||
+                                        (payload_0 > 8'd1) || // 仅支持 RAW / ENVELOPE。
                                         !is_supported_decimation(processing_decimation) ||
                                         (processing_points == 32'd0) ||
                                         (processing_refresh == 32'd0) ||
-                                        ((payload_0 == 8'd2) &&
-                                         (capture_depth_shadow > DEC_MAX_SAMPLES)) ||
                                         ((payload_13 & 8'hFE) != 8'd0)) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);

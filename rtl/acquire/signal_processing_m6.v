@@ -1,14 +1,12 @@
 `timescale 1ns / 1ps
 
-// M6 ADC 域处理顶层：配置换算、包络、CIC 抽取与基础测量。
+// ADC 域处理顶层：配置换算、包络与基础测量。
 module signal_processing_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000
 ) (
     input  wire        clk,
     input  wire        reset,
     input  wire        config_update,
-    input  wire [1:0]  data_mode,
-    input  wire [31:0] decimation,
     input  wire [31:0] capture_depth,
     input  wire [31:0] display_points,
     input  wire [31:0] refresh_millihz,
@@ -28,7 +26,6 @@ module signal_processing_m6 #(
     output wire [31:0] bucket_size,
     output wire [31:0] measurement_window_samples,
     output wire [31:0] frame_interval_samples,
-    output wire [31:0] effective_sample_rate_hz,
     output wire        processing_ready,
 
     output wire        envelope_valid,
@@ -38,9 +35,6 @@ module signal_processing_m6 #(
     output reg  [31:0] envelope_point_index,
     output wire [207:0] envelope_descriptor,
 
-    output wire        decimated_valid,
-    output wire [31:0] decimated_data,
-
     output wire        measurement_valid,
     output wire [367:0] measurement_data,
     output wire [207:0] measurement_descriptor
@@ -48,8 +42,6 @@ module signal_processing_m6 #(
 
     wire config_applied;
     wire config_busy;
-    wire [5:0] normalization_shift;
-    wire decimation_valid;
     wire [31:0] envelope_sample_rate_hz;
     reg processing_started;
 
@@ -76,11 +68,6 @@ module signal_processing_m6 #(
     wire [11:0] env_max_b;
     wire [31:0] env_bucket_samples;
     wire env_bucket_complete;
-
-    wire [11:0] decimated_a;
-    wire [11:0] decimated_b;
-    wire decimated_otr_a;
-    wire decimated_otr_b;
 
     wire [31:0] measurement_id;
     wire [31:0] measured_samples;
@@ -159,7 +146,6 @@ module signal_processing_m6 #(
         .clk                        (clk),
         .reset                      (reset),
         .config_update              (config_update),
-        .decimation                 (decimation),
         .capture_depth              (capture_depth),
         .display_points             (display_points),
         .refresh_millihz            (refresh_millihz),
@@ -168,10 +154,7 @@ module signal_processing_m6 #(
         .bucket_size                (bucket_size),
         .measurement_window_samples(measurement_window_samples),
         .frame_interval_samples    (frame_interval_samples),
-        .envelope_sample_rate_hz    (envelope_sample_rate_hz),
-        .effective_sample_rate_hz   (effective_sample_rate_hz),
-        .decimation_shift           (normalization_shift),
-        .decimation_valid           (decimation_valid)
+        .envelope_sample_rate_hz    (envelope_sample_rate_hz)
     );
 
     always @(posedge clk) begin
@@ -311,29 +294,6 @@ module signal_processing_m6 #(
     assign envelope_data = {
         4'd0, env_max_b, 4'd0, env_min_b,
         4'd0, env_max_a, 4'd0, env_min_a
-    };
-
-    cic_decimator_m6 u_cic_decimator_m6 (
-        .clk                (clk),
-        .reset              (reset),
-        .config_update      (processing_reset_pulse),
-        .enable             (processing_started && decimation_valid),
-        .decimation         (decimation),
-        .normalization_shift(normalization_shift),
-        .sample_valid       (sample_valid),
-        .code_a             (active_code_a),
-        .code_b             (active_code_b),
-        .otr_a              (active_otr_a),
-        .otr_b              (active_otr_b),
-        .output_valid       (decimated_valid),
-        .decimated_a        (decimated_a),
-        .decimated_b        (decimated_b),
-        .decimated_otr_a    (decimated_otr_a),
-        .decimated_otr_b    (decimated_otr_b)
-    );
-
-    assign decimated_data = {
-        6'd0, decimated_otr_b, decimated_otr_a, decimated_b, decimated_a
     };
 
     measurement_m6 #(

@@ -92,6 +92,8 @@ class PlotWidget(QtWidgets.QWidget):
             1: {"volts_per_div": 1.0, "position_div": 0.0},
             2: {"volts_per_div": 1.0, "position_div": 0.0},
         }
+        self._adc_gain = {1: 1.0, 2: 1.0}
+        self._adc_offset = {1: 0.0, 2: 0.0}
         self._last_frame: CompletedFrame | None = None
         self._has_trigger_alignment = False
         self._envelope_active = False
@@ -164,6 +166,30 @@ class PlotWidget(QtWidgets.QWidget):
         self._apply_visibility()
 
     set_channel_visibility = set_channel_visible
+
+    def set_adc_calibration(
+        self,
+        channel: int,
+        gain: float = 1.0,
+        offset_v: float = 0.0,
+    ) -> None:
+        channel = self._validate_channel(channel)
+        gain_value = float(gain)
+        offset_value = float(offset_v)
+        if not np.isfinite(gain_value) or gain_value <= 0:
+            raise ValueError("ADC 校准增益必须为正数")
+        if not np.isfinite(offset_value):
+            raise ValueError("ADC 校准偏移必须为有限数")
+        self._adc_gain[channel] = gain_value
+        self._adc_offset[channel] = offset_value
+        self._redraw_last_frame()
+
+    def _codes_to_volts(self, codes: np.ndarray, channel: int) -> np.ndarray:
+        return codes_to_voltage(
+            codes,
+            gain=self._adc_gain[channel],
+            offset_v=self._adc_offset[channel],
+        )
 
     def set_volts_per_div(self, channel: int, volts_per_div: float) -> None:
         channel = self._validate_channel(channel)
@@ -252,8 +278,8 @@ class PlotWidget(QtWidgets.QWidget):
                        if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
                        else 0x03)
         decoded = decode_raw32(frame.payload, decode_mask)
-        a = codes_to_voltage(decoded["a"])
-        b = codes_to_voltage(decoded["b"])
+        a = self._codes_to_volts(decoded["a"], 1)
+        b = self._codes_to_volts(decoded["b"], 2)
         if len(a) == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
             return
@@ -303,12 +329,12 @@ class PlotWidget(QtWidgets.QWidget):
         self._envelope_active = True
         # 中心线保留在主曲线上，便于旧版调用方读取；可视范围由
         # Min/Max 曲线和填充带表达，不再用中心线替代包络。
-        self.curve_a.setData(x, self._to_divisions(codes_to_voltage(trace_a), 1))
-        self.curve_b.setData(x, self._to_divisions(codes_to_voltage(trace_b), 2))
-        self.min_a.setData(x, self._to_divisions(codes_to_voltage(min_a), 1))
-        self.max_a.setData(x, self._to_divisions(codes_to_voltage(max_a), 1))
-        self.min_b.setData(x, self._to_divisions(codes_to_voltage(min_b), 2))
-        self.max_b.setData(x, self._to_divisions(codes_to_voltage(max_b), 2))
+        self.curve_a.setData(x, self._to_divisions(self._codes_to_volts(trace_a, 1), 1))
+        self.curve_b.setData(x, self._to_divisions(self._codes_to_volts(trace_b, 2), 2))
+        self.min_a.setData(x, self._to_divisions(self._codes_to_volts(min_a, 1), 1))
+        self.max_a.setData(x, self._to_divisions(self._codes_to_volts(max_a, 1), 1))
+        self.min_b.setData(x, self._to_divisions(self._codes_to_volts(min_b, 2), 2))
+        self.max_b.setData(x, self._to_divisions(self._codes_to_volts(max_b, 2), 2))
         self.fill_a.setVisible(True)
         self.fill_b.setVisible(True)
         self.trigger_line.setValue(0.0)

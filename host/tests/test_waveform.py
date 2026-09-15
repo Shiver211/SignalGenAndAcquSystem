@@ -5,8 +5,9 @@ import unittest
 import numpy as np
 
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, measure_waveform, median_filter_3,
-    smooth_binomial_5, voltage_to_code,
+    code_to_voltage, codes_to_voltage, format_frequency_hz, format_voltage,
+    fft_spectrum, gain_from_known_vpp, measure_waveform, median_filter_3,
+    smooth_binomial_5, voltage_to_code, vpp_from_code_span,
     zero_crossing_frequency,
 )
 
@@ -17,6 +18,19 @@ class WaveformTest(unittest.TestCase):
         np.testing.assert_allclose(volts, [-5.0, 5.0])
         self.assertEqual(voltage_to_code(-5), 0)
         self.assertEqual(voltage_to_code(5), 4095)
+        self.assertAlmostEqual(code_to_voltage(0), -5.0)
+        self.assertAlmostEqual(code_to_voltage(4095), 5.0)
+
+    def test_vpp_calibration_and_format(self) -> None:
+        self.assertAlmostEqual(vpp_from_code_span(844), 844 / 4095 * 10)
+        gain = gain_from_known_vpp(844, 2.0)
+        self.assertAlmostEqual(vpp_from_code_span(844, gain=gain), 2.0, places=6)
+        self.assertEqual(format_voltage(-1.089), "-1.089 V")
+        self.assertEqual(format_voltage(2.0, peak_to_peak=True), "2.000 V")
+        self.assertEqual(format_frequency_hz(10_000), "10.000 kHz")
+        self.assertEqual(format_frequency_hz(50.0), "50.0 Hz")
+        with self.assertRaises(ValueError):
+            gain_from_known_vpp(10, 8.0)
 
     def test_frequency_and_fft(self) -> None:
         sample_rate = 100_000

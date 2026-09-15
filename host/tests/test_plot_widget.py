@@ -68,6 +68,17 @@ class PlotWidgetTest(unittest.TestCase):
         finally:
             widget.close()
 
+    def test_adc_calibration_scales_displayed_volts(self) -> None:
+        widget = self.make_widget()
+        try:
+            words = np.array([2444 | (2048 << 12)], dtype="<u4")
+            widget.display_frame(raw_frame(words))
+            before = widget.curve_a.getData()[1].copy()
+            widget.set_adc_calibration(1, gain=0.5)
+            np.testing.assert_allclose(widget.curve_a.getData()[1], before * 0.5)
+        finally:
+            widget.close()
+
     def test_trigger_index_is_time_zero(self) -> None:
         widget = self.make_widget()
         try:

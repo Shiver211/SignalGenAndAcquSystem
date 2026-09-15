@@ -9,6 +9,8 @@ import numpy as np
 
 ADC_FULL_SCALE_VOLTS = 10.0
 ADC_MAX_CODE = 4095.0
+ADC_CAL_GAIN_MIN = 0.5
+ADC_CAL_GAIN_MAX = 1.5
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,47 @@ class WaveformMeasurements:
     mean_v: float
     vpp_v: float
     frequency_hz: float
+
+
+def code_to_voltage(
+    code: float,
+    *,
+    gain: float = 1.0,
+    offset_v: float = 0.0,
+) -> float:
+    """把单个 ADC 码换成输入电压。gain/offset 用于前端校准。"""
+    nominal = float(code) / ADC_MAX_CODE * ADC_FULL_SCALE_VOLTS - 5.0
+    return nominal * gain + offset_v
+
+
+def vpp_from_code_span(span: float, *, gain: float = 1.0) -> float:
+    """峰峰值码差（max-min）换成伏特；直流偏置会抵消。"""
+    return float(span) / ADC_MAX_CODE * ADC_FULL_SCALE_VOLTS * gain
+
+
+def gain_from_known_vpp(vpp_code: int, known_vpp: float) -> float:
+    """用已知输入峰峰值反推前端增益。"""
+    if vpp_code <= 0 or known_vpp <= 0:
+        raise ValueError("峰峰值必须大于 0")
+    gain = known_vpp / vpp_from_code_span(vpp_code)
+    if not ADC_CAL_GAIN_MIN <= gain <= ADC_CAL_GAIN_MAX:
+        raise ValueError(
+            f"校准增益 {gain:.3f} 超出 {ADC_CAL_GAIN_MIN}..{ADC_CAL_GAIN_MAX}"
+        )
+    return gain
+
+
+def format_voltage(voltage: float, *, peak_to_peak: bool = False) -> str:
+    if peak_to_peak:
+        return f"{voltage:.3f} V"
+    return f"{voltage:+.3f} V"
+
+
+def format_frequency_hz(frequency_hz: float) -> str:
+    value = float(frequency_hz)
+    if value >= 1000.0:
+        return f"{value / 1000.0:.3f} kHz"
+    return f"{value:.1f} Hz"
 
 
 def codes_to_voltage(

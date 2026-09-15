@@ -14,13 +14,17 @@ from host.comm.control_protocol import (
     raw_request_payload, retransmit_payload,
 )
 from host.comm.data_protocol import (
-    CompletedFrame, DataType, SampleFormat, decode_measurement_v1,
+    CompletedFrame, DataType, Measurement, SampleFormat, decode_measurement_v1,
 )
 from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
 from host.config import (
     ADC_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
     PC_IP, UART_BAUD, UDP_PORT,
+)
+from host.core.waveform import (
+    code_to_voltage, format_frequency_hz, format_voltage, gain_from_known_vpp,
+    vpp_from_code_span,
 )
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
@@ -44,7 +48,7 @@ TIME_PER_DIV = (
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(
         self, database_path: str | Path, parent: QtWidgets.QWidget | None = None,
-        *, auto_connect: bool = False,
+        *, auto_connect: bool = False, settings: QtCore.QSettings | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("FPGA 信号发生与采集系统")
@@ -54,9 +58,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.store = SqliteStore(database_path)
         self.current_frame: CompletedFrame | None = None
         self.latest_raw_frame_id = 0
+        self._last_measurement: Measurement | None = None
+        self._last_measurement_mask = 0
+        self._adc_gain = {1: 1.0, 2: 1.0}
+        self._adc_offset = {1: 0.0, 2: 0.0}
         self._uart_connected = False
         self._continuous_running = False
-        self.settings = QtCore.QSettings("FPGA Signal System", "Host")
+        self.settings = settings or QtCore.QSettings("FPGA Signal System", "Host")
+        self._load_adc_calibration()
         self._build_ui()
         self._connect_signals()
         self._refresh_ports()
@@ -251,15 +260,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
         self.plot_widget.set_volts_per_div(1, float(self.ch1_vdiv_combo.currentData()))
         self.plot_widget.set_volts_per_div(2, float(self.ch2_vdiv_combo.currentData()))
+        self._apply_adc_calibration()
         self._update_channel_controls()
         layout.addWidget(self.plot_widget, 1)
         self.measurement_labels = [QtWidgets.QLabel("—") for _ in range(8)]
         measure = QtWidgets.QGroupBox("测量")
-        grid = QtWidgets.QGridLayout(measure)
+        measure_layout = QtWidgets.QVBoxLayout(measure)
+        grid = QtWidgets.QGridLayout()
         titles = ["A Min", "A Max", "A Vpp", "A 频率", "B Min", "B Max", "B Vpp", "B 频率"]
         for i, title in enumerate(titles):
             grid.addWidget(QtWidgets.QLabel(title), i // 4 * 2, i % 4)
             grid.addWidget(self.measurement_labels[i], i // 4 * 2 + 1, i % 4)
+        cal_row = QtWidgets.QHBoxLayout()
+        self.cal_vpp_spin = QtWidgets.QDoubleSpinBox()
+        self.cal_vpp_spin.setRange(0.1, 10.0)
+        self.cal_vpp_spin.setDecimals(3)
+        self.cal_vpp_spin.setSingleStep(0.1)
+        self.cal_vpp_spin.setValue(2.0)
+        self.cal_vpp_spin.setSuffix(" Vpp")
+        self.calibrate_button = QtWidgets.QPushButton("校准幅度")
+        self.reset_cal_button = QtWidgets.QPushButton("复位校准")
+        cal_row.addWidget(QtWidgets.QLabel("已知峰峰值"))
+        cal_row.addWidget(self.cal_vpp_spin)
+        cal_row.addWidget(self.calibrate_button)
+        cal_row.addWidget(self.reset_cal_button)
+        cal_row.addStretch(1)
+        measure_layout.addLayout(grid)
+        measure_layout.addLayout(cal_row)
         layout.addWidget(measure)
         records = QtWidgets.QGroupBox("SQLite 记录与回放")
         record_layout = QtWidgets.QVBoxLayout(records)
@@ -298,6 +325,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_records_button.clicked.connect(self._refresh_records)
         self.replay_button.clicked.connect(self._replay_selected)
         self.delete_record_button.clicked.connect(self._delete_selected)
+        self.calibrate_button.clicked.connect(self._calibrate_amplitude)
+        self.reset_cal_button.clicked.connect(self._reset_adc_calibration)
         self.serial_link.connection_changed.connect(self._on_uart_connection)
         self.serial_link.response_received.connect(self._on_response)
         self.serial_link.request_failed.connect(lambda _, error: self.statusBar().showMessage(error, 5000))
@@ -462,28 +491,9 @@ class MainWindow(QtWidgets.QMainWindow):
             measurement = decode_measurement_v1(frame.payload)
             if persist_measurement:
                 self.store.save_measurement(frame.header.frame_id, measurement)
-            values = (
-                (measurement.min_a, measurement.max_a, measurement.vpp_a,
-                 measurement.frequency_hz_a, measurement.period_valid_a),
-                (measurement.min_b, measurement.max_b, measurement.vpp_b,
-                 measurement.frequency_hz_b, measurement.period_valid_b),
-            )
-            for channel, channel_values in enumerate(values, start=1):
-                enabled = bool(frame.header.channel_mask & (1 << (channel - 1)))
-                text_values = (
-                    str(value) if enabled and (index != 3 or valid)
-                    else ("无效" if enabled else "未启用")
-                    for index, value in enumerate(channel_values[:4])
-                    for valid in [index != 3 or channel_values[4]]
-                )
-                for label, value in zip(self.measurement_labels[(channel - 1) * 4:channel * 4],
-                                        text_values):
-                    label.setText(value)
-            otr_a = (str(measurement.otr_count_a)
-                     if frame.header.channel_mask & 0x01 else "未启用")
-            otr_b = (str(measurement.otr_count_b)
-                     if frame.header.channel_mask & 0x02 else "未启用")
-            self.status_labels["otr"].setText(f"{otr_a}/{otr_b}")
+            self._last_measurement = measurement
+            self._last_measurement_mask = frame.header.channel_mask
+            self._render_measurement(measurement, frame.header.channel_mask)
         else:
             # 时基切换期间残留的旧包络帧不能覆盖即时过渡显示；只有
             # 帧头时长匹配当前窗口的新帧才更新当前波形。
@@ -494,6 +504,94 @@ class MainWindow(QtWidgets.QMainWindow):
             # 测量包只更新读数，不能覆盖用户准备保存/回放的波形帧。
             self.current_frame = frame
             self.plot_widget.display_frame(frame)
+
+    def _load_adc_calibration(self) -> None:
+        for channel in (1, 2):
+            self._adc_gain[channel] = self.settings.value(
+                f"adc_cal/ch{channel}_gain", 1.0, type=float,
+            )
+            self._adc_offset[channel] = self.settings.value(
+                f"adc_cal/ch{channel}_offset", 0.0, type=float,
+            )
+
+    def _save_adc_calibration(self) -> None:
+        for channel in (1, 2):
+            self.settings.setValue(f"adc_cal/ch{channel}_gain", self._adc_gain[channel])
+            self.settings.setValue(
+                f"adc_cal/ch{channel}_offset", self._adc_offset[channel],
+            )
+
+    def _apply_adc_calibration(self) -> None:
+        for channel in (1, 2):
+            self.plot_widget.set_adc_calibration(
+                channel, self._adc_gain[channel], self._adc_offset[channel],
+            )
+
+    def _render_measurement(self, measurement: Measurement, channel_mask: int) -> None:
+        channels = (
+            (1, measurement.min_a, measurement.max_a, measurement.vpp_a,
+             measurement.frequency_hz_a, measurement.period_valid_a),
+            (2, measurement.min_b, measurement.max_b, measurement.vpp_b,
+             measurement.frequency_hz_b, measurement.period_valid_b),
+        )
+        for channel, min_code, max_code, vpp_code, frequency, valid in channels:
+            labels = self.measurement_labels[(channel - 1) * 4:channel * 4]
+            if not (channel_mask & (1 << (channel - 1))):
+                for label in labels:
+                    label.setText("未启用")
+                continue
+            gain = self._adc_gain[channel]
+            offset = self._adc_offset[channel]
+            labels[0].setText(format_voltage(code_to_voltage(min_code, gain=gain, offset_v=offset)))
+            labels[1].setText(format_voltage(code_to_voltage(max_code, gain=gain, offset_v=offset)))
+            labels[2].setText(format_voltage(
+                vpp_from_code_span(vpp_code, gain=gain), peak_to_peak=True,
+            ))
+            labels[3].setText(format_frequency_hz(frequency) if valid else "无效")
+        otr_a = (str(measurement.otr_count_a) if channel_mask & 0x01 else "未启用")
+        otr_b = (str(measurement.otr_count_b) if channel_mask & 0x02 else "未启用")
+        self.status_labels["otr"].setText(f"{otr_a}/{otr_b}")
+
+    def _calibrate_amplitude(self) -> None:
+        if self._last_measurement is None:
+            self.statusBar().showMessage("没有可用于校准的测量，请先运行采集", 4000)
+            return
+        known_vpp = self.cal_vpp_spin.value()
+        measurement = self._last_measurement
+        mask = self._last_measurement_mask
+        updated: list[str] = []
+        for channel, vpp_code, enabled in (
+            (1, measurement.vpp_a, mask & 0x01),
+            (2, measurement.vpp_b, mask & 0x02),
+        ):
+            if not enabled:
+                continue
+            try:
+                self._adc_gain[channel] = gain_from_known_vpp(vpp_code, known_vpp)
+            except ValueError as exc:
+                self.statusBar().showMessage(f"CH{channel} {exc}", 5000)
+                return
+            updated.append(f"CH{channel}×{self._adc_gain[channel]:.4f}")
+        if not updated:
+            self.statusBar().showMessage("当前没有已启用通道可校准", 4000)
+            return
+        self._save_adc_calibration()
+        self._apply_adc_calibration()
+        self._render_measurement(measurement, mask)
+        if self.current_frame is not None:
+            self.plot_widget.display_frame(self.current_frame)
+        self.statusBar().showMessage("幅度已校准：" + "，".join(updated), 5000)
+
+    def _reset_adc_calibration(self) -> None:
+        self._adc_gain = {1: 1.0, 2: 1.0}
+        self._adc_offset = {1: 0.0, 2: 0.0}
+        self._save_adc_calibration()
+        self._apply_adc_calibration()
+        if self._last_measurement is not None:
+            self._render_measurement(self._last_measurement, self._last_measurement_mask)
+        if self.current_frame is not None:
+            self.plot_widget.display_frame(self.current_frame)
+        self.statusBar().showMessage("已恢复标称 ±5V 换算", 3000)
 
     def _envelope_display_points(
         self, capture_depth: int, channel_mask: int, refresh_hz: float,

@@ -9,7 +9,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.ui.main_window import MainWindow
@@ -53,10 +53,37 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
                 channel_mask=1,
             )
             window._on_frame(measurement)
+            self.assertEqual(
+                [label.text() for label in window.measurement_labels[:4]],
+                ["-5.000 V", "-5.000 V", "0.000 V", "无效"],
+            )
             self.assertEqual([label.text() for label in window.measurement_labels[4:]],
                              ["未启用"] * 4)
-            self.assertEqual(window.measurement_labels[3].text(), "无效")
             self.assertEqual(window.status_labels["otr"].text(), "0/未启用")
+            window.close()
+            self.app.processEvents()
+
+    def test_amplitude_calibration_converts_codes_to_known_vpp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = QtCore.QSettings(
+                str(Path(directory) / "cal.ini"), QtCore.QSettings.IniFormat,
+            )
+            window = MainWindow(Path(directory) / "cal.db", settings=settings)
+            measurement = frame(
+                SampleFormat.MEASUREMENT_V1,
+                struct.pack(
+                    "<HHHHIIHHIIIIIIBB",
+                    1600, 2444, 1626, 2468, 2022, 2047, 844, 842,
+                    0, 0, 6500, 6500, 10_000, 10_000, 3, 0,
+                ),
+            )
+            window._on_frame(measurement)
+            window.cal_vpp_spin.setValue(2.0)
+            window._calibrate_amplitude()
+            self.assertEqual(window.measurement_labels[2].text(), "2.000 V")
+            self.assertEqual(window.measurement_labels[6].text(), "2.000 V")
+            self.assertEqual(window.measurement_labels[3].text(), "10.000 kHz")
+            self.assertAlmostEqual(window._adc_gain[1] * 844 / 4095 * 10, 2.0, places=6)
             window.close()
             self.app.processEvents()
 

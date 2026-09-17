@@ -129,6 +129,142 @@ def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
     ) / 16.0
 
 
+def _repeated_edge_matches(excess: np.ndarray, tolerance: float) -> np.ndarray:
+    """允许多种采样相位的重复形态，独立异常峰没有匹配对象便保留。"""
+    # 峰的位置会随亚采样相位和抽桶边界改变，比较幅度分布而非固定列。
+    profiles = np.sort(excess, axis=1)
+    peaks = profiles[:, -1]
+    matches = np.zeros(len(profiles), dtype=bool)
+    # 每个边沿只与邻近八次同向边沿比较，避免长帧进行全量两两比较。
+    for distance in range(1, min(len(profiles), 9)):
+        smaller_peak = np.minimum(peaks[:-distance], peaks[distance:])
+        allowed = np.maximum(tolerance * 2.0, smaller_peak * 0.5)
+        repeated = ((smaller_peak > tolerance)
+                    & (np.max(np.abs(profiles[:-distance] - profiles[distance:]), axis=1)
+                       <= allowed))
+        matches[:-distance] |= repeated
+        matches[distance:] |= repeated
+    # 整体仍需至少三次且多数边沿得到重复验证，不能用两个偶发峰启动修整。
+    if np.count_nonzero(matches) < max(3, int(np.ceil(len(profiles) * 0.6))):
+        matches[:] = False
+    return matches
+
+
+def suppress_repeated_edge_overshoot(samples: np.ndarray) -> np.ndarray:
+    """仅修整重复方波边沿后的同形过冲，供等间隔原始采样的显示使用。
+
+    用双平台和持续电平跳变识别方波，再比较同方向边沿后的六个样本。
+    至少三次且多数边沿有相近过冲才处理；独立尖峰、短脉冲和异常边沿
+    保留。与重复过冲同相同形的毛刺无法区分，可关闭显示修整查看原始值。
+    """
+    values = np.asarray(samples, dtype=np.float64)
+    result = values.copy()
+    if values.size < 32:
+        return result
+
+    lower, upper = np.quantile(values, [0.1, 0.9])
+    if upper <= lower:
+        return result
+    high_state = values > (lower + upper) / 2.0
+    low = float(np.median(values[~high_state]))
+    high = float(np.median(values[high_state]))
+    span = high - low
+    # 正弦/三角波没有占据大多数样本的两个稳定平台，不参与修整。
+    residual = np.abs(values - np.where(high_state, high, low))
+    if np.mean(residual <= span * 0.08) < 0.8:
+        return result
+    tolerance = max(span * 0.005, float(np.median(residual)) * 4.0)
+
+    edges = np.flatnonzero(high_state[1:] != high_state[:-1]) + 1
+    runs = np.diff(np.r_[0, edges, values.size])
+    # 跳变两侧至少各持续十二点，避免把窄脉冲的边沿当作方波主边沿。
+    edges = edges[(runs[:-1] >= 12) & (runs[1:] >= 12)]
+    offsets = np.arange(6)
+    for rising, level, previous in ((True, high, low), (False, low, high)):
+        starts = edges[high_state[edges] == rising]
+        if starts.size < 3:
+            continue
+        before = values[starts[:, None] + np.arange(-6, -3)]
+        settled = values[starts[:, None] + np.arange(6, 10)]
+        stable = ((np.max(np.abs(before - previous), axis=1) <= span * 0.08)
+                  & (np.max(np.abs(settled - level), axis=1) <= span * 0.08))
+        starts = starts[stable]
+        if starts.size < 3:
+            continue
+
+        indices = starts[:, None] + offsets
+        direction = 1.0 if rising else -1.0
+        excess = np.maximum(direction * (values[indices] - level), 0.0)
+        matches = _repeated_edge_matches(excess, tolerance)
+        correction = matches[:, None] & (excess > tolerance)
+        result[indices[correction]] = level
+    return result
+
+
+def suppress_envelope_edge_overshoot(
+    minimum: np.ndarray, maximum: np.ndarray, samples_per_bucket: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """修整压缩包络的重复过冲，同时保留桶内独立毛刺的极值。
+
+    桶内采样顺序已经丢失，因此从窄包络的平台估计高低电平，比较多次
+    同向边沿附近的极值。比较排序后的过冲幅度，允许过冲落在相邻桶；
+    平台不可分辨或边沿附近存在异常峰时保留原样。
+    """
+    lo = np.asarray(minimum, dtype=np.float64)
+    hi = np.asarray(maximum, dtype=np.float64)
+    if samples_per_bucket == 1:
+        if np.array_equal(lo, hi):
+            corrected = suppress_repeated_edge_overshoot(lo)
+            return corrected, corrected.copy()
+        return lo.copy(), hi.copy()
+    result_lo, result_hi = lo.copy(), hi.copy()
+    if lo.size < 16:
+        return result_lo, result_hi
+
+    center = (lo + hi) / 2.0
+    lower, upper = np.quantile(center, [0.1, 0.9])
+    if upper <= lower:
+        return result_lo, result_hi
+    high_state = center > (lower + upper) / 2.0
+    # 跨越跳变的宽包络不能用来估计平台，否则过冲会抬高目标电平。
+    narrow = hi - lo <= (upper - lower) * 0.08
+    low_plateau, high_plateau = narrow & ~high_state, narrow & high_state
+    if (np.count_nonzero(narrow) < lo.size * 0.25
+            or min(np.count_nonzero(low_plateau), np.count_nonzero(high_plateau)) < 3):
+        return result_lo, result_hi
+    low = float(np.median(center[low_plateau]))
+    high = float(np.median(center[high_plateau]))
+    span = high - low
+    residual = np.abs(center - np.where(high_state, high, low))
+    if np.mean(residual[narrow] <= span * 0.08) < 0.8:
+        return result_lo, result_hi
+    tolerance = max(span * 0.005, float(np.median(residual[narrow])) * 4.0)
+
+    edges = np.flatnonzero(high_state[1:] != high_state[:-1]) + 1
+    runs = np.diff(np.r_[0, edges, lo.size])
+    minimum_run = max(2, int(np.ceil(12 / samples_per_bucket)))
+    edges = edges[(runs[:-1] >= minimum_run) & (runs[1:] >= minimum_run)]
+    # 中心线跨阈值的桶可能比真实跳变晚一桶，前一桶也需参与比较。
+    window = int(np.ceil(6 / samples_per_bucket)) + 1
+    edges = edges[(edges >= 1) & (edges + window <= lo.size)]
+    for rising, level in ((True, high), (False, low)):
+        starts = edges[high_state[edges] == rising]
+        if starts.size < 3:
+            continue
+        indices = starts[:, None] + np.arange(-1, window)
+        excess = np.maximum(hi[indices] - level if rising else level - lo[indices], 0.0)
+        matches = _repeated_edge_matches(excess, tolerance)
+        corrected = indices[matches[:, None] & (excess > tolerance)]
+        # 同时修整上下边界，中心线稍后由修整后的包络重新计算。
+        if rising:
+            result_lo[corrected] = np.minimum(result_lo[corrected], level)
+            result_hi[corrected] = np.minimum(result_hi[corrected], level)
+        else:
+            result_lo[corrected] = np.maximum(result_lo[corrected], level)
+            result_hi[corrected] = np.maximum(result_hi[corrected], level)
+    return result_lo, result_hi
+
+
 def fft_spectrum(samples: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.ndarray]:
     values = np.asarray(samples, dtype=np.float64)
     if values.size < 2 or sample_rate_hz <= 0:

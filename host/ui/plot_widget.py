@@ -16,8 +16,10 @@ import pyqtgraph as pg
 from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
+from host.config import ADC_SAMPLE_RATE_HZ
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum,
+    codes_to_voltage, fft_spectrum, suppress_envelope_edge_overshoot,
+    suppress_repeated_edge_overshoot,
 )
 
 
@@ -63,17 +65,17 @@ class PlotWidget(QtWidgets.QWidget):
 
         self.plot.addLegend()
         self.curve_a = self.plot.plot(
-            pen=pg.mkPen("#3da5ff", width=1.5), name="CH1",
+            pen=pg.mkPen("#3da5ff", width=1.5), name="CH1", antialias=True,
         )
         self.curve_b = self.plot.plot(
-            pen=pg.mkPen("#ffb020", width=1.5), name="CH2",
+            pen=pg.mkPen("#ffb020", width=1.5), name="CH2", antialias=True,
         )
 
         # 包络帧同时保留每桶的 Min/Max，避免把桶内瞬态压成一个中心点。
-        self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
-        self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1))
-        self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1))
-        self.max_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1))
+        self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1), antialias=True)
+        self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1), antialias=True)
+        self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1), antialias=True)
+        self.max_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1), antialias=True)
         self.fill_a = pg.FillBetweenItem(
             self.min_a, self.max_a, pg.mkBrush(61, 165, 255, 45),
         )
@@ -85,6 +87,7 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
 
         self._fft = False
+        self._edge_overshoot_suppression = True
         self._seconds_per_div = 0.001
         self._channel_mode = ChannelDisplayMode.BOTH
         self._visible_channels = {1, 2}
@@ -119,6 +122,11 @@ class PlotWidget(QtWidgets.QWidget):
         self._fft = bool(enabled)
         if self._last_frame is not None:
             self.display_frame(self._last_frame)
+
+    def set_edge_overshoot_suppression(self, enabled: bool) -> None:
+        """切换显示修整，并从保留的原始帧重绘。"""
+        self._edge_overshoot_suppression = bool(enabled)
+        self._redraw_last_frame()
 
     def set_channel_mode(self, mode: ChannelDisplayMode | int | str) -> None:
         """选择 ``BOTH``、``CH1`` 或 ``CH2`` 显示。"""
@@ -301,6 +309,11 @@ class PlotWidget(QtWidgets.QWidget):
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
+        # 极值抽点后的样本不再等间隔，不能用于边沿形状比较。
+        if (self._edge_overshoot_suppression and len(indices) == len(a)
+                and sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)):
+            display_a = suppress_repeated_edge_overshoot(display_a)
+            display_b = suppress_repeated_edge_overshoot(display_b)
         x = (indices - (trigger_index if align_trigger else 0)) / sample_rate
         self._has_trigger_alignment = align_trigger
         self._set_time_range()
@@ -330,8 +343,16 @@ class PlotWidget(QtWidgets.QWidget):
             min_a, max_a = min_a[:visible_count], max_a[:visible_count]
             min_b, max_b = min_b[:visible_count], max_b[:visible_count]
         sample_rate = float(frame.header.sample_rate_hz)
+        if self._edge_overshoot_suppression:
+            samples_per_bucket = max(1, round(ADC_SAMPLE_RATE_HZ / sample_rate))
+            min_a, max_a = suppress_envelope_edge_overshoot(min_a, max_a, samples_per_bucket)
+            min_b, max_b = suppress_envelope_edge_overshoot(min_b, max_b, samples_per_bucket)
         trace_a = (min_a + max_a) / 2.0
         trace_b = (min_b + max_b) / 2.0
+        self._envelope_channels = {
+            channel for channel, lo, hi in ((1, min_a, max_a), (2, min_b, max_b))
+            if np.any(lo != hi)
+        }
         trigger_index = self._clamped_trigger_index(frame, len(trace_a))
         x = (np.arange(len(trace_a), dtype=np.float64) - trigger_index) / sample_rate
         self._has_trigger_alignment = trigger_index > 0
@@ -345,8 +366,6 @@ class PlotWidget(QtWidgets.QWidget):
         self.max_a.setData(x, self._to_divisions(self._codes_to_volts(max_a, 1), 1))
         self.min_b.setData(x, self._to_divisions(self._codes_to_volts(min_b, 2), 2))
         self.max_b.setData(x, self._to_divisions(self._codes_to_volts(max_b, 2), 2))
-        self.fill_a.setVisible(True)
-        self.fill_b.setVisible(True)
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
@@ -430,10 +449,13 @@ class PlotWidget(QtWidgets.QWidget):
         self.fill_b.setVisible(False)
         self._last_frame = None
         self._envelope_active = False
+        self._envelope_channels = set()
         self._has_trigger_alignment = False
         self._set_time_range()
 
     def _clear_envelope(self) -> None:
+        self._envelope_channels = set()
+        self._envelope_active = False
         for curve in (self.min_a, self.max_a, self.min_b, self.max_b):
             curve.clear()
         self.fill_a.setVisible(False)
@@ -459,9 +481,9 @@ class PlotWidget(QtWidgets.QWidget):
         self.curve_a.setVisible(ch1_visible)
         self.curve_b.setVisible(ch2_visible)
         for curve in (self.min_a, self.max_a, self.fill_a):
-            curve.setVisible(ch1_visible and self._envelope_active)
+            curve.setVisible(ch1_visible and 1 in self._envelope_channels)
         for curve in (self.min_b, self.max_b, self.fill_b):
-            curve.setVisible(ch2_visible and self._envelope_active)
+            curve.setVisible(ch2_visible and 2 in self._envelope_channels)
         self.trigger_line.setVisible(True)
 
     @staticmethod

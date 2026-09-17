@@ -278,6 +278,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.note_edit = QtWidgets.QLineEdit(); self.note_edit.setPlaceholderText("记录备注")
         toolbar.addWidget(QtWidgets.QLabel("波形显示（10 × 8 div）"))
         toolbar.addStretch(1)
+        self.edge_overshoot_checkbox = QtWidgets.QCheckBox("抑制边沿过冲")
+        self.edge_overshoot_checkbox.setChecked(True)
+        self.edge_overshoot_checkbox.setToolTip(
+            "减弱重复方波边沿后的同形过冲，保留独立毛刺。\n"
+            "仅调整显示，测量和保存使用原始数据；取消勾选可对照原始波形。\n"
+            "支持压缩包络；平台不可分辨或样本不足时保留原样。"
+        )
+        toolbar.addWidget(self.edge_overshoot_checkbox)
         # FFT、记录/回放属于后续高级功能，保留对象和槽函数但不放入主布局。
         self.analysis_combo.setVisible(False)
         self.note_edit.setVisible(False)
@@ -359,6 +367,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ch1_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(1, value))
         self.ch2_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(2, value))
         self.analysis_combo.currentIndexChanged.connect(self._set_analysis)
+        self.edge_overshoot_checkbox.toggled.connect(
+            self.plot_widget.set_edge_overshoot_suppression,
+        )
         self.save_button.clicked.connect(self._save_current)
         self.refresh_records_button.clicked.connect(self._refresh_records)
         self.replay_button.clicked.connect(self._replay_selected)

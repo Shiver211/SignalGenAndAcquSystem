@@ -12,6 +12,8 @@ from PyQt5 import QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.core.waveform import codes_to_voltage, zero_crossing_frequency
+from host.config import ADC_SAMPLE_RATE_HZ, MAX_ENVELOPE_POINTS
+from host.tests.waveform_helpers import sampled_square_with_overshoot, square_with_overshoot
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
 
 
@@ -197,7 +199,9 @@ class PlotWidgetTest(unittest.TestCase):
             np.testing.assert_allclose(
                 volts, codes_to_voltage(codes), atol=0.02,
             )
-            self.assertTrue(widget.min_a.isVisible())
+            self.assertFalse(widget.min_a.isVisible())
+            self.assertFalse(widget.max_a.isVisible())
+            self.assertFalse(widget.fill_a.isVisible())
         finally:
             widget.close()
 
@@ -235,7 +239,7 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertTrue(widget.min_a.isVisible())
             self.assertTrue(widget.max_a.isVisible())
             self.assertTrue(widget.fill_a.isVisible())
-            self.assertTrue(widget.fill_b.isVisible())
+            self.assertFalse(widget.fill_b.isVisible())
             self.assertTrue(widget.curve_a.isVisible())
         finally:
             widget.close()
@@ -288,6 +292,158 @@ class PlotWidgetTest(unittest.TestCase):
                                    places=6)
         finally:
             widget.close()
+
+    def test_overshoot_toggle_restores_raw_and_full_rate_envelope(self) -> None:
+        source = square_with_overshoot()
+        source[30] = 1.6
+        codes = np.rint((source + 5.0) / 10.0 * 4095).astype(np.uint16)
+        channel_b = np.full_like(codes, 2048)
+        raw = raw_frame(codes.astype(np.uint32) | (channel_b.astype(np.uint32) << 12),
+                        sample_rate=65_000_000)
+        payload = np.column_stack((codes, codes, channel_b, channel_b)).astype('<u2').tobytes()
+        envelope = CompletedFrame(
+            PacketHeader(1, 2, 8, len(codes), 65_000_000, 0, 3,
+                         SampleFormat.ENVELOPE64, 0, 0, len(payload), 0), payload,
+        )
+        for frame in (raw, envelope):
+            with self.subTest(format=frame.header.sample_format):
+                widget = self.make_widget()
+                try:
+                    widget.set_timebase(1e-6)
+                    widget.display_frame(frame)
+                    x, corrected = widget.curve_a.getData()
+                    np.testing.assert_allclose(x, np.arange(len(codes)) / 65_000_000)
+                    self.assertLess(corrected[17], codes_to_voltage(codes)[17])
+                    self.assertEqual(corrected[30], codes_to_voltage(codes)[30])
+                    self.assertFalse(widget.min_a.isVisible())
+                    self.assertFalse(widget.max_a.isVisible())
+                    self.assertFalse(widget.fill_a.isVisible())
+                    widget.set_edge_overshoot_suppression(False)
+                    np.testing.assert_array_equal(widget.curve_a.getData()[1],
+                                                  codes_to_voltage(codes))
+                    widget.set_edge_overshoot_suppression(True)
+                    np.testing.assert_array_equal(widget.curve_a.getData()[1], corrected)
+                    self.assertIs(widget._last_frame, frame)
+                finally:
+                    widget.close()
+
+    def test_full_rate_envelope_with_range_keeps_extrema(self) -> None:
+        codes = np.rint((square_with_overshoot() + 5) / 10 * 4095).astype(np.uint16)
+        spread = 20
+        payload = np.column_stack((codes - spread, codes + spread,
+                                   codes, codes)).astype('<u2').tobytes()
+        frame = CompletedFrame(
+            PacketHeader(1, 2, 9, len(codes), ADC_SAMPLE_RATE_HZ, 0, 3,
+                         SampleFormat.ENVELOPE64, 0, 0, len(payload), 0), payload,
+        )
+        widget = self.make_widget()
+        try:
+            widget.display_frame(frame)
+            np.testing.assert_array_equal(widget.curve_a.getData()[1], codes_to_voltage(codes))
+            np.testing.assert_array_equal(widget.max_a.getData()[1], codes_to_voltage(codes + spread))
+            self.assertTrue(widget.fill_a.isVisible())
+        finally:
+            widget.close()
+
+    def test_fractional_frequencies_in_raw_and_envelope_display(self) -> None:
+        cases = ((1e-6, SampleFormat.RAW32), (1e-6, SampleFormat.ENVELOPE64),
+                 (5e-6, SampleFormat.ENVELOPE64), (20e-6, SampleFormat.ENVELOPE32))
+        for frequency in (500_000, 600_000, 800_000, 1_000_000):
+            for timebase, sample_format in cases:
+                with self.subTest(frequency=frequency, timebase=timebase, format=sample_format):
+                    count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+                    bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+                    source = sampled_square_with_overshoot(frequency, count, 0.35)
+                    codes = np.rint((source + 5) / 10 * 4095).astype(np.uint16)
+                    offsets = np.arange(0, count, bucket)
+                    lo, hi = np.minimum.reduceat(codes, offsets), np.maximum.reduceat(codes, offsets)
+                    mask = 1 if sample_format == SampleFormat.ENVELOPE32 else 3
+                    if sample_format == SampleFormat.RAW32:
+                        payload = (codes.astype('<u4') | (2048 << 12)).tobytes()
+                    else:
+                        other = np.full_like(lo, 2048)
+                        slots = (lo, hi, other, other) if mask == 3 else (lo, hi)
+                        payload = np.column_stack(slots).astype('<u2').tobytes()
+                    frame = CompletedFrame(
+                        PacketHeader(1, 1 if sample_format == SampleFormat.RAW32 else 2,
+                                     11, len(lo), ADC_SAMPLE_RATE_HZ // bucket, 0,
+                                     mask, sample_format, 0, 0, len(payload), 0), payload,
+                    )
+                    widget = self.make_widget()
+                    try:
+                        widget.set_timebase(timebase)
+                        widget.display_frame(frame)
+                        if sample_format == SampleFormat.RAW32:
+                            actual_lo = actual_hi = widget.curve_a.getData()[1]
+                        else:
+                            actual_lo, actual_hi = widget.min_a.getData()[1], widget.max_a.getData()[1]
+                        guard = max(1, int(np.ceil(12 / bucket)))
+                        before = (np.maximum(codes_to_voltage(hi)[guard:-guard] - 1, 0)
+                                  + np.maximum(-1 - codes_to_voltage(lo)[guard:-guard], 0)).sum()
+                        after = (np.maximum(actual_hi[guard:-guard] - 1, 0)
+                                 + np.maximum(-1 - actual_lo[guard:-guard], 0)).sum()
+                        self.assertLess(after, before * 0.25)
+                        self.assertIsNone(widget.curve_a.opts['stepMode'])
+                        widget.set_edge_overshoot_suppression(False)
+                        np.testing.assert_allclose(widget.curve_a.getData()[1],
+                                                   codes_to_voltage((lo.astype(float) + hi) / 2))
+                        self.assertEqual(frame.payload, payload)
+                    finally:
+                        widget.close()
+
+    def test_compressed_timebases_suppress_overshoot_and_keep_glitches(self) -> None:
+        cases = ((5e-6, 65, 3), (10e-6, 65, 3), (20e-6, 65, 3),
+                 (50e-6, 65, 3), (100e-6, 650, 3), (1e-3, 6500, 3),
+                 (5e-6, 65, 1), (10e-6, 65, 2))
+        for timebase, period, channel_mask in cases:
+            with self.subTest(timebase=timebase, period=period, channel_mask=channel_mask):
+                count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+                bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+                source = square_with_overshoot(count, period)
+                edges = np.flatnonzero((source[:-1] < 0) != (source[1:] < 0)) + 1
+                glitches = (edges[0] + period // 4, edges[1] + period // 4,
+                            edges[6] + 2, edges[10] + period // 4)
+                source[glitches[0]] = 1.6  # 高平台毛刺。
+                source[glitches[1]] = -1.5  # 低平台毛刺。
+                source[glitches[2]] = 1.8  # 紧贴边沿的异常尖峰。
+                source[glitches[3]:glitches[3] + 2] = -1.0  # 跨阈值窄脉冲。
+                codes = np.rint((source + 5) / 10 * 4095).astype(np.uint16)
+                offsets = np.arange(0, count, bucket)
+                lo, hi = np.minimum.reduceat(codes, offsets), np.maximum.reduceat(codes, offsets)
+                other = np.full_like(lo, 2048)
+                slots = (lo, hi, other, other) if channel_mask == 3 else (lo, hi)
+                payload = np.column_stack(slots).astype('<u2').tobytes()
+                sample_format = SampleFormat.ENVELOPE64 if channel_mask == 3 else SampleFormat.ENVELOPE32
+                frame = CompletedFrame(
+                    PacketHeader(1, 2, 10, len(lo), ADC_SAMPLE_RATE_HZ // bucket, 0,
+                                 channel_mask, sample_format, 0, 0, len(payload), 0), payload,
+                )
+                widget = self.make_widget()
+                try:
+                    widget.set_timebase(timebase)
+                    widget.display_frame(frame)
+                    main, minimum, maximum = ((widget.curve_b, widget.min_b, widget.max_b)
+                                              if channel_mask == 2 else
+                                              (widget.curve_a, widget.min_a, widget.max_a))
+                    actual_lo, actual_hi = minimum.getData()[1], maximum.getData()[1]
+                    start = int(np.ceil(8 * period / bucket))
+                    self.assertLessEqual(float(actual_hi[start:-3].max()), 1.005)
+                    self.assertGreaterEqual(float(actual_lo[start:-3].min()), -1.005)
+                    self.assertGreater(float(codes_to_voltage(hi)[start:-3].max()), 1.1)
+                    self.assertTrue(np.all(actual_lo <= actual_hi))
+                    np.testing.assert_allclose(main.getData()[1], (actual_lo + actual_hi) / 2)
+                    for position in glitches:
+                        index = position // bucket
+                        self.assertEqual(actual_lo[index], codes_to_voltage(lo)[index])
+                        self.assertEqual(actual_hi[index], codes_to_voltage(hi)[index])
+                    original_x = main.getData()[0].copy()
+                    widget.set_edge_overshoot_suppression(False)
+                    np.testing.assert_array_equal(minimum.getData()[1], codes_to_voltage(lo))
+                    np.testing.assert_array_equal(maximum.getData()[1], codes_to_voltage(hi))
+                    np.testing.assert_array_equal(main.getData()[0], original_x)
+                    self.assertEqual(frame.payload, payload)
+                finally:
+                    widget.close()
 
 
 if __name__ == "__main__":

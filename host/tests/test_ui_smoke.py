@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import QtWidgets
@@ -18,6 +20,7 @@ from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.comm.control_protocol import Command, DataMode
 from host.config import ADC_SAMPLE_RATE_HZ, PC_IP, UART_BAUD, UDP_PORT
 from host.tests.window_helpers import create_window
+from host.tests.waveform_helpers import square_with_overshoot
 from host.ui.main_window import RAW_MAX_SAMPLES, TIME_PER_DIV
 
 
@@ -35,6 +38,33 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIn("DAC 波形控制", [group.title() for group in window.findChildren(QtWidgets.QGroupBox)])
             window.close()
             self.app.processEvents()
+
+    def test_edge_display_toggle_preserves_measurement_and_saved_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "edge.db")
+            try:
+                codes = np.rint((square_with_overshoot() + 5) / 10 * 4095).astype('<u4')
+                payload = (codes | (2048 << 12)).tobytes()
+                frame = CompletedFrame(
+                    PacketHeader(1, 1, 10, len(codes), ADC_SAMPLE_RATE_HZ, 0, 3,
+                                 SampleFormat.RAW32, 0, 0, len(payload), 0), payload,
+                )
+                window._on_frame(frame)
+                window._measure_raw_frame(frame)
+                measured = [label.text() for label in window.measurement_labels]
+                self.assertEqual(window._last_measurement.max_a, int(codes.max()))
+                corrected = window.plot_widget.curve_a.getData()[1].copy()
+                window.edge_overshoot_checkbox.setChecked(False)
+                self.assertGreater(window.plot_widget.curve_a.getData()[1][17], corrected[17])
+                window.edge_overshoot_checkbox.setChecked(True)
+                np.testing.assert_array_equal(window.plot_widget.curve_a.getData()[1], corrected)
+                self.assertEqual([label.text() for label in window.measurement_labels], measured)
+                window._save_current()
+                record = window.store.list_captures()[0]
+                self.assertEqual(window.store.load_frame(record.id).payload, payload)
+            finally:
+                window.close()
+                self.app.processEvents()
 
     def test_dac_controls_submit_two_channels_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

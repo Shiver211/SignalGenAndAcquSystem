@@ -15,7 +15,7 @@ from PyQt5 import QtWidgets
 from math import ceil
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
-from host.comm.control_protocol import Command
+from host.comm.control_protocol import Command, DataMode
 from host.config import ADC_SAMPLE_RATE_HZ, PC_IP, UART_BAUD, UDP_PORT
 from host.tests.window_helpers import create_window
 from host.ui.main_window import RAW_MAX_SAMPLES, TIME_PER_DIV
@@ -263,6 +263,66 @@ class UiSmokeTest(unittest.TestCase):
                 window.timebase_combo.setCurrentText("2 ms/div")
             flush.assert_called_once_with()
             self.assertIs(window.current_frame, envelope)
+            window.close()
+            self.app.processEvents()
+
+    def test_manual_mode_hides_run_stop_and_sends_immediate_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "manual.db")
+            window.acquisition_mode_combo.setCurrentText("手动")
+            self.assertTrue(window.run_button.isHidden())
+            self.assertTrue(window.stop_button.isHidden())
+            self.assertFalse(window.capture_button.isHidden())
+            window.duration_spin.setValue(10)
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._start_manual_capture()
+            commands = [call.args[0] for call in send.call_args_list]
+            self.assertEqual(commands[-1], Command.ARM)
+            self.assertIn(Command.SET_PROCESSING, commands)
+            processing = next(
+                call.args[1] for call in send.call_args_list
+                if call.args[0] == Command.SET_PROCESSING
+            )
+            self.assertEqual(processing[0], DataMode.RAW)
+            acquisition = next(
+                call.args[1] for call in send.call_args_list
+                if call.args[0] == Command.SET_ACQUISITION
+            )
+            fields = struct.unpack("<BHHBIHBB", acquisition)
+            self.assertEqual(fields[4], 650_000)
+            self.assertEqual(fields[5], 0)
+            self.assertTrue(window._manual_busy)
+            window.close()
+            self.app.processEvents()
+
+    def test_manual_timebase_does_not_send_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "manual-tb.db")
+            window.acquisition_mode_combo.setCurrentText("手动")
+            window._uart_connected = True
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window.timebase_combo.setCurrentText("2 ms/div")
+            send.assert_not_called()
+            window.close()
+            self.app.processEvents()
+
+    def test_manual_raw_frame_updates_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "manual-raw.db")
+            window.acquisition_mode_combo.setCurrentText("手动")
+            window._manual_busy = True
+            words = struct.pack("<II", 0x0000_0800, 0x0000_0A00)
+            frame = CompletedFrame(
+                PacketHeader(
+                    1, 1, 3, 2, ADC_SAMPLE_RATE_HZ, 0, 3,
+                    SampleFormat.RAW32, 0, 0, len(words), 0,
+                ),
+                words,
+            )
+            window._on_frame(frame)
+            self.assertFalse(window._manual_busy)
+            self.assertIs(window.current_frame, frame)
+            self.assertNotEqual(window.measurement_labels[0].text(), "—")
             window.close()
             self.app.processEvents()
 

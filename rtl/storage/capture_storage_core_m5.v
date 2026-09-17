@@ -27,6 +27,7 @@ module capture_storage_core_m5 #(
     input  wire [31:0] capture_depth,
     input  wire [9:0]  pretrigger_permille,
     input  wire [1:0]  channel_mask,
+    input  wire        immediate_capture,
 
     input  wire        read_request_valid,
     output wire        read_request_ready,
@@ -208,6 +209,7 @@ module capture_storage_core_m5 #(
         .capture_depth         (capture_depth),
         .pretrigger_permille   (pretrigger_permille),
         .channel_mask          (channel_mask),
+        .immediate_capture     (immediate_capture),
         .stream_data           (fifo_wr_data),
         .stream_wr_en          (fifo_wr_en),
         .stream_full           (fifo_full),

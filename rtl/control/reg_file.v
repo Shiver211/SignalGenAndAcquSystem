@@ -94,12 +94,17 @@ module reg_file #(
     localparam [0:0] ST_IDLE     = 1'b0;
     localparam [0:0] ST_WAIT_CFG = 1'b1;
 
+    localparam [1:0] AUTO_IDLE          = 2'd0;
+    localparam [1:0] AUTO_WAIT_INVALID  = 2'd1;
+    localparam [1:0] AUTO_WAIT_VALID    = 2'd2;
+
     wire raw_single_channel = (raw_frame_channel_mask != 8'h03);
     wire [31:0] raw_alignment_mask = raw_single_channel ? 32'h0000_0001 :
                                                         32'h0000_0003;
 
     reg state;
     reg [7:0] pending_response_cmd;
+    reg [1:0] auto_raw_state;
 
     function is_supported_decimation;
         input [31:0] value;
@@ -304,6 +309,7 @@ module reg_file #(
             raw_upload_frame_id   <= 32'd0;
             raw_upload_offset     <= 32'd0;
             raw_upload_length     <= 32'd0;
+            auto_raw_state        <= AUTO_IDLE;
         end else begin
             adc_config_send <= 1'b0;
             arm_pulse       <= 1'b0;
@@ -312,6 +318,19 @@ module reg_file #(
 
             if (raw_upload_request && raw_upload_ready)
                 raw_upload_request <= 1'b0;
+
+            if (auto_raw_state == AUTO_WAIT_INVALID) begin
+                if (!raw_frame_valid)
+                    auto_raw_state <= AUTO_WAIT_VALID;
+            end else if (auto_raw_state == AUTO_WAIT_VALID) begin
+                if (raw_frame_valid && !raw_upload_request && raw_upload_ready) begin
+                    raw_upload_frame_id <= raw_frame_id;
+                    raw_upload_offset   <= 32'd0;
+                    raw_upload_length   <= raw_frame_total_bytes;
+                    raw_upload_request  <= 1'b1;
+                    auto_raw_state      <= AUTO_IDLE;
+                end
+            end
 
             if (response_valid && response_ready) begin
                 response_valid <= 1'b0;
@@ -487,6 +506,8 @@ module reg_file #(
                                         record_command_error(STATUS_BUSY);
                                     end else begin
                                         arm_pulse <= 1'b1;
+                                        auto_raw_state <= raw_frame_valid ?
+                                            AUTO_WAIT_INVALID : AUTO_WAIT_VALID;
                                         queue_empty_response(command_cmd, STATUS_OK);
                                     end
                                 end
@@ -497,6 +518,7 @@ module reg_file #(
                                         record_command_error(STATUS_INVALID_PARAM);
                                     end else begin
                                         stop_pulse <= 1'b1;
+                                        auto_raw_state <= AUTO_IDLE;
                                         queue_empty_response(command_cmd, STATUS_OK);
                                     end
                                 end
@@ -550,7 +572,8 @@ module reg_file #(
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
                                     end else if (!raw_frame_valid ||
-                                                 (command_payload[0 +: 32] != raw_frame_id)) begin
+                                                 ((command_payload[0 +: 32] != 32'd0) &&
+                                                  (command_payload[0 +: 32] != raw_frame_id))) begin
                                         queue_empty_response(command_cmd, STATUS_NO_FRAME);
                                         last_error <= STATUS_NO_FRAME;
                                     end else if (raw_upload_request || !raw_upload_ready) begin

@@ -200,6 +200,7 @@ def calibration_payload(
 
 
 def raw_request_payload(frame_id: int) -> bytes:
+    """frame_id=0 表示 FPGA 当前有效帧。"""
     return struct.pack("<I", frame_id)
 
 

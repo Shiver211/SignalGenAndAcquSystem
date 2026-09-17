@@ -287,12 +287,22 @@ class PlotWidget(QtWidgets.QWidget):
             self._display_fft(a, b, frame.header.sample_rate_hz)
             return
 
+        sample_rate = float(frame.header.sample_rate_hz)
+        trigger_index = self._clamped_trigger_index(frame, len(a))
+        # 立即采集的帧 trigger_index=0，从 t=0 起显示当前十格窗口。
+        align_trigger = trigger_index > 0
+        if not align_trigger:
+            visible = max(1, int(np.ceil(
+                self.HORIZONTAL_DIVISIONS * self._seconds_per_div * sample_rate
+            )))
+            if visible < len(a):
+                a = a[:visible]
+                b = b[:visible]
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
-        trigger_index = self._clamped_trigger_index(frame, len(a))
-        x = (indices - trigger_index) / float(frame.header.sample_rate_hz)
-        self._has_trigger_alignment = True
+        x = (indices - (trigger_index if align_trigger else 0)) / sample_rate
+        self._has_trigger_alignment = align_trigger
         self._set_time_range()
         self._clear_envelope()
         self._envelope_active = False

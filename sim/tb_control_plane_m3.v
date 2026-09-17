@@ -47,6 +47,16 @@ module tb_control_plane_m3;
     reg [168:0] expected_adc_config;
     integer failures;
     integer index;
+    integer wait_cycles;
+    reg raw_frame_valid;
+    reg [31:0] raw_frame_id;
+    reg [31:0] raw_frame_total_bytes;
+    wire raw_upload_request;
+    wire [31:0] raw_upload_frame_id;
+    wire [31:0] raw_upload_offset;
+    wire [31:0] raw_upload_length;
+    reg clear_upload_seen;
+    reg upload_seen;
 
     control_plane #(
         .CLK_FREQ_HZ       (CLK_FREQ_HZ),
@@ -66,14 +76,14 @@ module tb_control_plane_m3;
         .adc_capture_done           (1'b0),
         .dac_update_rate_ch1_hz     (32'd1_388_889),
         .dac_update_rate_ch2_hz     (32'd1_388_888),
-        .raw_frame_valid            (1'b0),
-        .raw_frame_id               (32'd0),
-        .raw_frame_total_bytes      (32'd0),
+        .raw_frame_valid            (raw_frame_valid),
+        .raw_frame_id               (raw_frame_id),
+        .raw_frame_total_bytes      (raw_frame_total_bytes),
         .raw_frame_channel_mask     (8'h03),
-        .raw_upload_request         (),
-        .raw_upload_frame_id        (),
-        .raw_upload_offset          (),
-        .raw_upload_length          (),
+        .raw_upload_request         (raw_upload_request),
+        .raw_upload_frame_id        (raw_upload_frame_id),
+        .raw_upload_offset          (raw_upload_offset),
+        .raw_upload_length          (raw_upload_length),
         .raw_upload_ready           (1'b1),
         .wave_sel_ch1               (wave_sel_ch1),
         .ftw_ch1                    (ftw_ch1),
@@ -103,6 +113,13 @@ module tb_control_plane_m3;
 
     always #5 clk_sys = ~clk_sys;
     always #7.692 clk_adc = ~clk_adc;
+
+    always @(posedge clk_sys) begin
+        if (reset_sys || clear_upload_seen)
+            upload_seen <= 1'b0;
+        else if (raw_upload_request)
+            upload_seen <= 1'b1;
+    end
 
     function [7:0] crc8_atm_next;
         input [7:0] crc_in;
@@ -267,6 +284,10 @@ module tb_control_plane_m3;
         request_payload = 256'd0;
         observed_payload = 256'd0;
         failures        = 0;
+        raw_frame_valid = 1'b0;
+        raw_frame_id = 32'd0;
+        raw_frame_total_bytes = 32'd0;
+        clear_upload_seen = 1'b0;
 
         repeat (20) @(posedge clk_sys);
         reset_sys = 1'b0;
@@ -454,6 +475,56 @@ module tb_control_plane_m3;
             failures = failures + 1;
         end else begin
             $display("[PASS] STOP pulse CDC");
+        end
+
+        raw_frame_valid = 1'b1;
+        raw_frame_id = 32'd7;
+        raw_frame_total_bytes = 32'd40;
+        send_request(8'h04, 8'd0, request_payload, 1'b0);
+        expect_response(8'h04, 8'h00);
+        repeat (8) @(posedge clk_sys);
+        if (raw_upload_request) begin
+            $display("[FAIL] auto RAW upload started on stale frame");
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] auto RAW upload waits for stale frame to drop");
+        end
+        raw_frame_valid = 1'b0;
+        repeat (8) @(posedge clk_sys);
+        raw_frame_id = 32'd8;
+        raw_frame_total_bytes = 32'd24;
+        raw_frame_valid = 1'b1;
+        wait_cycles = 0;
+        while (!raw_upload_request && wait_cycles < 20) begin
+            @(posedge clk_sys);
+            wait_cycles = wait_cycles + 1;
+        end
+        if (!raw_upload_request || (raw_upload_frame_id !== 32'd8) ||
+            (raw_upload_offset !== 32'd0) || (raw_upload_length !== 32'd24)) begin
+            $display("[FAIL] auto RAW upload mismatch req=%0d id=%0d off=%0d len=%0d",
+                     raw_upload_request, raw_upload_frame_id, raw_upload_offset,
+                     raw_upload_length);
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] auto RAW upload after new frame");
+        end
+        send_request(8'h05, 8'd0, request_payload, 1'b0);
+        expect_response(8'h05, 8'h00);
+        repeat (12) @(posedge clk_adc);
+
+        clear_upload_seen = 1'b1;
+        @(posedge clk_sys);
+        clear_upload_seen = 1'b0;
+        clear_request_payload();
+        request_payload[0 * 8 +: 32] = 32'd0;
+        send_request(8'h08, 8'd4, request_payload, 1'b0);
+        expect_response(8'h08, 8'h00);
+        if (!upload_seen || (raw_upload_length !== 32'd24)) begin
+            $display("[FAIL] REQUEST_RAW(0) did not upload current frame seen=%0d len=%0d",
+                     upload_seen, raw_upload_length);
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] REQUEST_RAW(0) uploads current frame");
         end
 
         // 强制控制忙，验证明确 BUSY 应答。

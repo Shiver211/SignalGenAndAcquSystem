@@ -112,6 +112,8 @@ module ddr3_subsystem_m6 (
     wire trigger_falling = adc_control_config[25];
     wire [31:0] capture_depth = adc_control_config[57:26];
     wire [9:0] pretrigger_permille = adc_control_config[67:58];
+    wire [1:0] data_mode = adc_control_config[69:68];
+    wire immediate_capture = (data_mode == 2'd0);
     wire [31:0] display_points = adc_control_config[133:102];
     wire [31:0] refresh_millihz = adc_control_config[165:134];
     wire envelope_enable = adc_control_config[166];
@@ -198,7 +200,7 @@ module ddr3_subsystem_m6 (
         .trigger_source(trigger_source), .trigger_threshold(trigger_threshold),
         .trigger_hysteresis(trigger_hysteresis), .trigger_falling(trigger_falling),
         .capture_depth(capture_depth), .pretrigger_permille(pretrigger_permille),
-        .channel_mask(channel_mask),
+        .channel_mask(channel_mask), .immediate_capture(immediate_capture),
         .read_request_valid(raw_net_read_request_valid),
         .read_request_ready(raw_net_read_request_ready),
         .read_request_start_sample(raw_net_read_request_start_sample),

@@ -25,6 +25,7 @@ module tb_capture_storage_m5;
     reg [31:0] capture_depth = 32'd18;
     reg [9:0] pretrigger_permille = 10'd500;
     reg [1:0] channel_mask = 2'b11;
+    reg immediate_capture = 1'b0;
 
     reg read_request_valid = 1'b0;
     wire read_request_ready;
@@ -284,6 +285,7 @@ module tb_capture_storage_m5;
         .capture_depth             (capture_depth),
         .pretrigger_permille       (pretrigger_permille),
         .channel_mask              (channel_mask),
+        .immediate_capture         (immediate_capture),
         .read_request_valid        (read_request_valid),
         .read_request_ready        (read_request_ready),
         .read_request_start_sample (read_request_start_sample),
@@ -557,7 +559,64 @@ module tb_capture_storage_m5;
                    fifo_overflow);
         end
 
-        $display("M5_CAPTURE_STORAGE_SIM_PASS frames=4 sustained_samples=528 stop_abort=PASS");
+        // Case 6：立即采集，不等边沿，8 点写满。
+        immediate_capture = 1'b1;
+        trigger_threshold = 12'd2000;
+        capture_depth = 32'd8;
+        pretrigger_permille = 10'd500;
+        repeat (8) @(posedge clk_adc);
+        @(negedge clk_adc);
+        control_armed = 1'b1;
+        wait_capture_state();
+        for (source_id = 0; source_id < 8; source_id = source_id + 1) begin
+            send_sample(12'd900, 4000 + source_id);
+            expected_frame3[source_id] = pack_raw(
+                12'd900, 4000 + source_id,
+                (((4000 + source_id) % 3) == 0),
+                (((4000 + source_id) % 5) == 0));
+        end
+        stop_samples();
+        timeout = 0;
+        while ((!frame_valid || (frame_id != 32'd5)) && timeout < 5000) begin
+            @(posedge ui_clk);
+            timeout = timeout + 1;
+        end
+        if (frame_id != 32'd5) $fatal(1, "M5 immediate frame did not freeze");
+        if (frame_total_samples != 32'd8 || frame_trigger_index != 32'd0 ||
+            fifo_overflow) begin
+            $fatal(1, "M5 immediate metadata mismatch depth=%0d index=%0d ovf=%0d",
+                   frame_total_samples, frame_trigger_index, fifo_overflow);
+        end
+        @(negedge ui_clk);
+        read_request_start_sample = frame_start_sample;
+        read_request_sample_count = 32'd8;
+        read_request_valid = 1'b1;
+        timeout = 0;
+        while (!read_request_ready && timeout < 1000) begin
+            @(posedge ui_clk);
+            timeout = timeout + 1;
+        end
+        if (!read_request_ready) $fatal(1, "M5 immediate read request timeout");
+        @(negedge ui_clk);
+        read_request_valid = 1'b0;
+        received = 0;
+        timeout = 0;
+        while ((received < 8) && (timeout < 5000)) begin
+            @(posedge ui_clk);
+            timeout = timeout + 1;
+            if (read_sample_valid && read_sample_ready) begin
+                if (read_sample_data !== expected_frame3[received]) begin
+                    $fatal(1, "M5 immediate sample mismatch index=%0d expected=%h actual=%h",
+                           received, expected_frame3[received], read_sample_data);
+                end
+                received = received + 1;
+            end
+        end
+        if (received != 8 || read_error)
+            $fatal(1, "M5 immediate read failed received=%0d error=%0d", received, read_error);
+        immediate_capture = 1'b0;
+
+        $display("M5_CAPTURE_STORAGE_SIM_PASS frames=5 immediate=PASS stop_abort=PASS");
         $finish;
     end
 

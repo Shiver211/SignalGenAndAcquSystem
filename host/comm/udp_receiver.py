@@ -166,6 +166,7 @@ class UdpReceiver(QtCore.QObject):
     retransmit_required = QtCore.pyqtSignal(int, int, int)
     stats_updated = QtCore.pyqtSignal(dict)
     running_changed = QtCore.pyqtSignal(bool, str)
+    raw_progress = QtCore.pyqtSignal(int, int)
 
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
@@ -201,6 +202,16 @@ class UdpReceiver(QtCore.QObject):
         if not self.running:
             self.reassembler = FrameReassembler()
 
+    def _emit_raw_progress(self) -> None:
+        latest: _FrameState | None = None
+        for (data_type, _frame_id), state in self.reassembler.frames.items():
+            if data_type == DataType.RAW_FRAME and (
+                latest is None or state.updated >= latest.updated
+            ):
+                latest = state
+        if latest is not None and latest.total_bytes:
+            self.raw_progress.emit(latest.received_bytes, latest.total_bytes)
+
     def _worker(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # 实时示波器宁可丢弃过期帧，也不能缓存数秒的历史波形。
@@ -223,6 +234,7 @@ class UdpReceiver(QtCore.QObject):
                 try:
                     datagram, _ = sock.recvfrom(2048)
                     frame = self.reassembler.ingest(datagram)
+                    self._emit_raw_progress()
                     if frame is not None:
                         self.frame_received.emit(frame)
                 except socket.timeout:

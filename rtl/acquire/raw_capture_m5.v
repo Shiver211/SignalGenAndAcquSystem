@@ -22,6 +22,7 @@ module raw_capture_m5 (
     input  wire [31:0] capture_depth,
     input  wire [9:0]  pretrigger_permille,
     input  wire [1:0]  channel_mask,
+    input  wire        immediate_capture,
 
     output wire [98:0] stream_data,
     output wire        stream_wr_en,
@@ -65,6 +66,7 @@ module raw_capture_m5 (
     reg [31:0] post_samples_target;
     reg [31:0] post_samples_seen;
     reg        first_sample_pending;
+    reg        immediate_latched;
 
     wire [11:0] selected_code = source_latched ?
         (channel_mask_latched[1] ? code_b : code_a) :
@@ -94,18 +96,21 @@ module raw_capture_m5 (
     wire [41:0] divide_next_quotient =
         {divide_quotient[40:0], divide_qbit};
 
-    wire trigger_enable = (history_count >= pretrigger_samples);
+    wire trigger_enable = immediate_latched ||
+                          (history_count >= pretrigger_samples);
     wire trigger_now;
     wire trigger_qualified;
+    wire capture_accept = (state == S_CAPTURE) && sample_valid && !stream_full;
+    wire force_trigger = immediate_latched && !triggered && capture_accept;
+    wire trigger_event = trigger_now || force_trigger;
 
-    wire trigger_sample_is_last = !triggered && trigger_now &&
+    wire trigger_sample_is_last = !triggered && trigger_event &&
                                   (post_samples_target == 32'd0);
     wire post_sample_is_last = triggered &&
                                (post_samples_target != 32'd0) &&
                                (post_samples_seen == post_samples_target - 1'b1);
     wire current_sample_is_last = trigger_sample_is_last || post_sample_is_last;
 
-    wire capture_accept = (state == S_CAPTURE) && sample_valid && !stream_full;
     wire abort_accept = (state == S_ABORT) && !stream_full;
 
     assign stream_wr_en = capture_accept || abort_accept;
@@ -154,6 +159,7 @@ module raw_capture_m5 (
             post_samples_target   <= 32'd0;
             post_samples_seen     <= 32'd0;
             first_sample_pending  <= 1'b1;
+            immediate_latched     <= 1'b0;
             triggered             <= 1'b0;
             capture_aborted       <= 1'b0;
             fifo_overflow         <= 1'b0;
@@ -169,6 +175,7 @@ module raw_capture_m5 (
                         falling_latched      <= trigger_falling;
                         channel_mask_latched <= channel_mask;
                         depth_latched        <= capture_depth;
+                        immediate_latched    <= immediate_capture;
                         pretrigger_product   <= 42'd0;
                         multiply_multiplicand <= {10'd0, capture_depth};
                         multiply_multiplier <= pretrigger_permille;
@@ -180,7 +187,14 @@ module raw_capture_m5 (
                         capture_aborted      <= 1'b0;
                         fifo_overflow        <= 1'b0;
                         accepted_samples     <= 32'd0;
-                        state                <= S_MULTIPLY;
+                        if (immediate_capture) begin
+                            pretrigger_samples  <= 32'd0;
+                            post_samples_target <= (capture_depth == 32'd0)
+                                ? 32'd0 : (capture_depth - 1'b1);
+                            state <= S_CAPTURE;
+                        end else begin
+                            state <= S_MULTIPLY;
+                        end
                     end
                 end
 
@@ -248,7 +262,7 @@ module raw_capture_m5 (
                             history_count <= history_count + 1'b1;
                         end
 
-                        if (!triggered && trigger_now) begin
+                        if (!triggered && trigger_event) begin
                             triggered         <= 1'b1;
                             post_samples_seen <= 32'd0;
                             if (post_samples_target == 32'd0) begin

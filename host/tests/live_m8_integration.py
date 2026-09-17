@@ -13,8 +13,7 @@ import serial
 from host.comm.control_protocol import (
     Command, DataMode, Response, ResponseParser, Waveform,
     acquisition_payload, encode_request, generator_payload,
-    parse_device_status, processing_payload, raw_request_payload,
-    retransmit_payload,
+    parse_device_status, processing_payload, retransmit_payload,
 )
 from host.comm.data_protocol import (
     CompletedFrame, DataType, SampleFormat, decode_envelope64,
@@ -174,8 +173,6 @@ def main() -> int:
                 DataMode.RAW, 1, 256, 10, commit=True,
             ))
             control.ok(Command.ARM)
-            time.sleep(0.5)
-            control.ok(Command.REQUEST_RAW, raw_request_payload(1))
             raw = receive_frames(sock, control, {SampleFormat.RAW32}, timeout=5.0)[SampleFormat.RAW32]
 
             measurement_frame = live[SampleFormat.MEASUREMENT_V1]

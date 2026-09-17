@@ -298,22 +298,12 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, title in enumerate(titles):
             grid.addWidget(QtWidgets.QLabel(title), i // 4 * 2, i % 4)
             grid.addWidget(self.measurement_labels[i], i // 4 * 2 + 1, i % 4)
-        cal_row = QtWidgets.QHBoxLayout()
-        self.cal_vpp_spin = QtWidgets.QDoubleSpinBox()
-        self.cal_vpp_spin.setRange(0.1, 10.0)
-        self.cal_vpp_spin.setDecimals(3)
-        self.cal_vpp_spin.setSingleStep(0.1)
-        self.cal_vpp_spin.setValue(2.0)
-        self.cal_vpp_spin.setSuffix(" Vpp")
-        self.calibrate_button = QtWidgets.QPushButton("校准幅度")
-        self.reset_cal_button = QtWidgets.QPushButton("复位校准")
-        cal_row.addWidget(QtWidgets.QLabel("已知峰峰值"))
-        cal_row.addWidget(self.cal_vpp_spin)
-        cal_row.addWidget(self.calibrate_button)
-        cal_row.addWidget(self.reset_cal_button)
-        cal_row.addStretch(1)
+        self.cal_vpp_spins: dict[int, QtWidgets.QDoubleSpinBox] = {}
+        self.calibrate_buttons: dict[int, QtWidgets.QPushButton] = {}
+        self.reset_cal_buttons: dict[int, QtWidgets.QPushButton] = {}
         measure_layout.addLayout(grid)
-        measure_layout.addLayout(cal_row)
+        measure_layout.addLayout(self._make_cal_row(1))
+        measure_layout.addLayout(self._make_cal_row(2))
         layout.addWidget(measure)
         records = QtWidgets.QGroupBox("SQLite 记录与回放")
         record_layout = QtWidgets.QVBoxLayout(records)
@@ -329,7 +319,28 @@ class MainWindow(QtWidgets.QMainWindow):
         record_layout.addLayout(record_buttons)
         records.setVisible(False)
         layout.addWidget(records)
+        self._update_channel_controls()
         return panel
+
+    def _make_cal_row(self, channel: int) -> QtWidgets.QHBoxLayout:
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setRange(0.1, 10.0)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.1)
+        spin.setValue(2.0)
+        spin.setSuffix(" Vpp")
+        calibrate = QtWidgets.QPushButton(f"校准 CH{channel}")
+        reset = QtWidgets.QPushButton(f"复位 CH{channel}")
+        self.cal_vpp_spins[channel] = spin
+        self.calibrate_buttons[channel] = calibrate
+        self.reset_cal_buttons[channel] = reset
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel(f"CH{channel} 已知峰峰值"))
+        row.addWidget(spin)
+        row.addWidget(calibrate)
+        row.addWidget(reset)
+        row.addStretch(1)
+        return row
 
     def _connect_signals(self) -> None:
         self.refresh_port_button.clicked.connect(self._refresh_ports)
@@ -352,8 +363,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_records_button.clicked.connect(self._refresh_records)
         self.replay_button.clicked.connect(self._replay_selected)
         self.delete_record_button.clicked.connect(self._delete_selected)
-        self.calibrate_button.clicked.connect(self._calibrate_amplitude)
-        self.reset_cal_button.clicked.connect(self._reset_adc_calibration)
+        for channel in (1, 2):
+            self.calibrate_buttons[channel].clicked.connect(
+                lambda _checked=False, ch=channel: self._calibrate_amplitude(ch)
+            )
+            self.reset_cal_buttons[channel].clicked.connect(
+                lambda _checked=False, ch=channel: self._reset_adc_calibration(ch)
+            )
         self.serial_link.connection_changed.connect(self._on_uart_connection)
         self.serial_link.response_received.connect(self._on_response)
         self.serial_link.request_failed.connect(lambda _, error: self.statusBar().showMessage(error, 5000))
@@ -732,46 +748,46 @@ class MainWindow(QtWidgets.QMainWindow):
         otr_b = (str(measurement.otr_count_b) if channel_mask & 0x02 else "未启用")
         self.status_labels["otr"].setText(f"{otr_a}/{otr_b}")
 
-    def _calibrate_amplitude(self) -> None:
+    def _calibrate_amplitude(self, channel: int) -> None:
+        if channel not in (1, 2):
+            raise ValueError("通道必须为 1 或 2")
         if self._last_measurement is None:
             self.statusBar().showMessage("没有可用于校准的测量，请先运行采集", 4000)
             return
-        known_vpp = self.cal_vpp_spin.value()
-        measurement = self._last_measurement
         mask = self._last_measurement_mask
-        updated: list[str] = []
-        for channel, vpp_code, enabled in (
-            (1, measurement.vpp_a, mask & 0x01),
-            (2, measurement.vpp_b, mask & 0x02),
-        ):
-            if not enabled:
-                continue
-            try:
-                self._adc_gain[channel] = gain_from_known_vpp(vpp_code, known_vpp)
-            except ValueError as exc:
-                self.statusBar().showMessage(f"CH{channel} {exc}", 5000)
-                return
-            updated.append(f"CH{channel}×{self._adc_gain[channel]:.4f}")
-        if not updated:
-            self.statusBar().showMessage("当前没有已启用通道可校准", 4000)
+        if not (mask & (1 << (channel - 1))):
+            self.statusBar().showMessage(f"CH{channel} 未启用，无法校准", 4000)
             return
+        measurement = self._last_measurement
+        vpp_code = measurement.vpp_a if channel == 1 else measurement.vpp_b
+        known_vpp = self.cal_vpp_spins[channel].value()
+        try:
+            gain = gain_from_known_vpp(vpp_code, known_vpp)
+        except ValueError as exc:
+            self.statusBar().showMessage(f"CH{channel} {exc}", 5000)
+            return
+        self._adc_gain[channel] = gain
         self._save_adc_calibration()
         self._apply_adc_calibration()
         self._render_measurement(measurement, mask)
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
-        self.statusBar().showMessage("幅度已校准：" + "，".join(updated), 5000)
+        self.statusBar().showMessage(
+            f"幅度已校准：CH{channel}×{self._adc_gain[channel]:.4f}", 5000,
+        )
 
-    def _reset_adc_calibration(self) -> None:
-        self._adc_gain = {1: 1.0, 2: 1.0}
-        self._adc_offset = {1: 0.0, 2: 0.0}
+    def _reset_adc_calibration(self, channel: int) -> None:
+        if channel not in (1, 2):
+            raise ValueError("通道必须为 1 或 2")
+        self._adc_gain[channel] = 1.0
+        self._adc_offset[channel] = 0.0
         self._save_adc_calibration()
         self._apply_adc_calibration()
         if self._last_measurement is not None:
             self._render_measurement(self._last_measurement, self._last_measurement_mask)
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
-        self.statusBar().showMessage("已恢复标称 ±5V 换算", 3000)
+        self.statusBar().showMessage(f"CH{channel} 已恢复标称 ±5V 换算", 3000)
 
     def _envelope_display_points(
         self, capture_depth: int, channel_mask: int, refresh_hz: float,
@@ -851,6 +867,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ch1_position_spin.setEnabled(ch1_active)
         self.ch2_vdiv_combo.setEnabled(ch2_active)
         self.ch2_position_spin.setEnabled(ch2_active)
+        if getattr(self, "cal_vpp_spins", None):
+            for widget in (
+                self.cal_vpp_spins[1], self.calibrate_buttons[1],
+                self.reset_cal_buttons[1],
+            ):
+                widget.setEnabled(ch1_active)
+            for widget in (
+                self.cal_vpp_spins[2], self.calibrate_buttons[2],
+                self.reset_cal_buttons[2],
+            ):
+                widget.setEnabled(ch2_active)
         self.trigger_source.setEnabled(mode == ChannelDisplayMode.BOTH)
         if mode == ChannelDisplayMode.CH1:
             self.trigger_source.setCurrentIndex(0)

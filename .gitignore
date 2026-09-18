@@ -4,6 +4,7 @@
 /artifacts/
 /captures/
 /host/data/
+/docs/
 
 # 可重新生成的构建、仿真与 Vivado 工作目录。
 /build/

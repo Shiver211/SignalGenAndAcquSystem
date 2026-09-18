@@ -71,7 +71,7 @@ def period_reference(
     period_count = int(len(periods))
     return (
         period_sum // period_count,
-        SAMPLE_RATE * period_count // period_sum,
+        (SAMPLE_RATE * period_count + period_sum // 2) // period_sum,
         True,
     )
 

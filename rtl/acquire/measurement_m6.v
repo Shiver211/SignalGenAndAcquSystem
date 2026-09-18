@@ -405,7 +405,10 @@ module measurement_m6 #(
                     state            <= S_WAIT_FREQ_A;
                 end
                 S_WAIT_FREQ_A: if (divider_done) begin
-                    frequency_hz_a <= divider_quotient[31:0];
+                    // 向最近整数取整，避免 Fs*N/S 截断后相对信号源整赫兹少 1Hz。
+                    frequency_hz_a <= divider_quotient[31:0] +
+                        (({divider_remainder, 1'b0} >= {1'b0, latched_period_sum_a})
+                         ? 32'd1 : 32'd0);
                     state <= (latched_period_count_b >= MIN_PERIODS)
                         ? S_START_PERIOD_B : S_FINISH;
                 end
@@ -426,7 +429,9 @@ module measurement_m6 #(
                     state            <= S_WAIT_FREQ_B;
                 end
                 S_WAIT_FREQ_B: if (divider_done) begin
-                    frequency_hz_b <= divider_quotient[31:0];
+                    frequency_hz_b <= divider_quotient[31:0] +
+                        (({divider_remainder, 1'b0} >= {1'b0, latched_period_sum_b})
+                         ? 32'd1 : 32'd0);
                     state <= S_FINISH;
                 end
                 S_FINISH: begin

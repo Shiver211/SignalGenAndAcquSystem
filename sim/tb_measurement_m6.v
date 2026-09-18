@@ -75,6 +75,17 @@ module tb_measurement_m6;
                         frequency_hz_a, frequency_hz_b,
                         period_valid_a, period_valid_b);
                 end
+            end else if (measurement_count == 2) begin
+                // 1024/28=36.571、1024/9=113.778：截断为 36/113，四舍五入为 37/114。
+                if (!period_valid_a || !period_valid_b ||
+                    period_samples_a != 28 || period_samples_b != 9 ||
+                    frequency_hz_a != 37 || frequency_hz_b != 114) begin
+                    $fatal(1,
+                        "rounded frequency mismatch pa/pb/fa/fb/va/vb=%0d/%0d/%0d/%0d/%0d/%0d",
+                        period_samples_a, period_samples_b,
+                        frequency_hz_a, frequency_hz_b,
+                        period_valid_a, period_valid_b);
+                end
             end else begin
                 $fatal(1, "unexpected extra measurement");
             end
@@ -114,6 +125,25 @@ module tb_measurement_m6;
         end
         if (measurement_count != 2)
             $fatal(1, "measurement timeout count=%0d", measurement_count);
+        if (calculation_overrun)
+            $fatal(1, "unexpected measurement calculation overrun");
+
+        for (sample_index = 0; sample_index < WINDOW_SAMPLES;
+             sample_index = sample_index + 1) begin
+            code_a <= ((sample_index % 28) < 14) ? 12'd2000 : 12'd2400;
+            code_b <= ((sample_index % 9) < 4) ? 12'd1900 : 12'd2300;
+            sample_valid <= 1'b1;
+            @(posedge clk);
+        end
+        sample_valid <= 1'b0;
+
+        timeout = 0;
+        while ((measurement_count < 3) && (timeout < 2000)) begin
+            @(posedge clk);
+            timeout = timeout + 1;
+        end
+        if (measurement_count != 3)
+            $fatal(1, "rounded measurement timeout count=%0d", measurement_count);
         if (calculation_overrun)
             $fatal(1, "unexpected measurement calculation overrun");
 

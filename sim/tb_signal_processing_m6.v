@@ -50,6 +50,7 @@ module tb_signal_processing_m6;
     signal_processing_m6 #(
         .SAMPLE_RATE_HZ(1024)
     ) dut (
+        .sample_rate_hz(32'd1024), .interleave_enable(1'b0),
         .clk(clk), .reset(reset), .config_update(config_update),
         .capture_depth(capture_depth),
         .display_points(display_points), .refresh_millihz(refresh_millihz),

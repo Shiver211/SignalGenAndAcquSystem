@@ -10,6 +10,8 @@ from enum import IntEnum
 import numpy as np
 
 
+INTERLEAVE_FLAG = 0x0100
+
 HEADER = struct.Struct("<HBBIIIIBBHIHH")
 MEASUREMENT_V1 = struct.Struct("<HHHHIIHHIIIIIIBB")
 

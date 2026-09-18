@@ -1,10 +1,11 @@
 `timescale 1ns / 1ps
 
 // 把采集窗口和显示参数转换为包络桶大小、刷新间隔和包络采样率。
-// SAMPLE_RATE_HZ 当前为 65Msps；130Msps 交织时只改此参数，桶公式保持不变。
+// 配置时锁存运行时采样率（65/130 MSps），全部窗口以有效样本计数。
 module processing_config_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000
 ) (
+    input wire [31:0] sample_rate_hz,
     input  wire        clk,
     input  wire        reset,
     input  wire        config_update,
@@ -19,7 +20,9 @@ module processing_config_m6 #(
     output reg  [31:0] envelope_sample_rate_hz
 );
 
-    localparam [63:0] RATE_MILLI = SAMPLE_RATE_HZ * 64'd1000;
+    reg [63:0] rate_milli;
+    always @(posedge clk) rate_milli <= sample_rate_latched * 64'd1000;
+    reg [31:0] sample_rate_latched;
 
     reg [31:0] display_points_latched;
     reg [31:0] window_samples_latched;
@@ -41,7 +44,7 @@ module processing_config_m6 #(
 
     // 相邻包络帧起始间隔（以 ADC 有效样本计）= ceil(Fs / refresh)。
     wire [63:0] interval_dividend =
-        RATE_MILLI + {32'd0, refresh_millihz_latched} - 64'd1;
+        rate_milli + {32'd0, refresh_millihz_latched} - 64'd1;
 
     unsigned_divider_m6 u_bucket_divider (
         .clk            (clk),
@@ -65,6 +68,7 @@ module processing_config_m6 #(
            ? 32'hFFFF_FFFF : divider_quotient[31:0]);
     always @(posedge clk) begin
         if (reset) begin
+            sample_rate_latched <= SAMPLE_RATE_HZ;
             divider_start             <= 1'b0;
             divider_dividend          <= 64'd0;
             divider_divisor           <= 64'd1;
@@ -75,13 +79,14 @@ module processing_config_m6 #(
             config_applied            <= 1'b0;
             bucket_size               <= 32'd64;
             measurement_window_samples <= 32'd65_536;
-            frame_interval_samples    <= (RATE_MILLI + 64'd19_999) / 64'd20_000;
+            frame_interval_samples    <= (SAMPLE_RATE_HZ * 64'd1000 + 64'd19_999) / 64'd20_000;
             envelope_sample_rate_hz   <= SAMPLE_RATE_HZ / 64;
         end else begin
             divider_start  <= 1'b0;
             config_applied <= 1'b0;
 
             if (config_update && !config_busy) begin
+                sample_rate_latched <= sample_rate_hz;
                 display_points_latched   <= (display_points == 32'd0)
                     ? 32'd1 : display_points;
                 window_samples_latched   <= (capture_depth == 32'd0)
@@ -101,7 +106,7 @@ module processing_config_m6 #(
             if (divider_done && (calculation_state == CALC_BUCKET)) begin
                 bucket_size <= divided_bucket;
                 measurement_window_samples <= window_samples_latched;
-                divider_dividend <= SAMPLE_RATE_HZ;
+                divider_dividend <= sample_rate_latched;
                 divider_divisor  <= divided_bucket;
                 divider_start    <= 1'b1;
                 calculation_state <= CALC_RATE;

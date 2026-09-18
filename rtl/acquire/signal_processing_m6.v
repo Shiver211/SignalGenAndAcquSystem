@@ -4,6 +4,8 @@
 module signal_processing_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000
 ) (
+    input wire interleave_enable,
+    input wire [31:0] sample_rate_hz,
     input  wire        clk,
     input  wire        reset,
     input  wire        config_update,
@@ -143,6 +145,7 @@ module signal_processing_m6 #(
     processing_config_m6 #(
         .SAMPLE_RATE_HZ (SAMPLE_RATE_HZ)
     ) u_processing_config_m6 (
+        .sample_rate_hz(sample_rate_hz),
         .clk                        (clk),
         .reset                      (reset),
         .config_update              (config_update),
@@ -300,6 +303,7 @@ module signal_processing_m6 #(
         .SAMPLE_RATE_HZ (SAMPLE_RATE_HZ),
         .MIN_PERIODS    (8)
     ) u_measurement_m6 (
+        .sample_rate_hz(sample_rate_hz),
         .clk                (clk),
         .reset              (reset),
         .config_update      (processing_reset_pulse),
@@ -360,7 +364,7 @@ module signal_processing_m6 #(
         .trigger_index  (32'd0),
         .channel_mask   ({6'd0, channel_mask}),
         .sample_format  ((channel_mask == 2'b11) ? 8'h02 : 8'h06),
-        .flags          (16'd0),
+        .flags          (interleave_enable ? 16'h0100 : 16'd0),
         .decimation     (bucket_size),
         .descriptor     (envelope_descriptor)
     );
@@ -369,11 +373,11 @@ module signal_processing_m6 #(
         .data_type      (8'h03),
         .frame_id       (measurement_id),
         .total_samples  (measured_samples),
-        .sample_rate_hz (SAMPLE_RATE_HZ),
+        .sample_rate_hz (sample_rate_hz),
         .trigger_index  (32'd0),
         .channel_mask   ({6'd0, channel_mask}),
         .sample_format  (8'h03),
-        .flags          ({13'd0, calculation_overrun,
+        .flags          ({7'd0, interleave_enable, 5'd0, calculation_overrun,
                           period_valid_b, period_valid_a}),
         .decimation     (32'd1),
         .descriptor     (measurement_descriptor)

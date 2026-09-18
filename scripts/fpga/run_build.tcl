@@ -1,5 +1,6 @@
 set project_root [file normalize [file join [file dirname [info script]] .. ..]]
 open_project [file join $project_root Signal.xpr]
+set reuse_ip [expr {($argc > 0) && ([lindex $argv 0] eq "rtl_only")}]
 
 # 顶层 RTL 变更必须从源码重新建立网表。自动增量综合曾在子模块
 # 修改后仍拼接旧 DCP，导致 bitstream 与 RTL 不一致，因此这里显式禁用。
@@ -25,9 +26,17 @@ set_property top Top [get_filesets sources_1]
 generate_target all [get_ips]
 update_compile_order -fileset sources_1
 
+# 时钟端口已增加 130MHz，必须重建主时钟 OOC DCP。
+set adc_ip_run [get_runs -quiet clk_wiz_m0_synth_1]
+if {!$reuse_ip && [llength $adc_ip_run]} {
+    reset_run $adc_ip_run
+    launch_runs $adc_ip_run -jobs 4
+    wait_on_run $adc_ip_run
+    if {[get_property PROGRESS $adc_ip_run] ne "100%"} {error "ADC clock IP synthesis failed"}
+}
 # 顶层综合前重建以太网时钟 IP，防止旧 OOC DCP 覆盖当前 XCI 参数。
 set eth_ip_run [get_runs -quiet clk_eth_125m_m7_synth_1]
-if {[llength $eth_ip_run] != 0} {
+if {!$reuse_ip && [llength $eth_ip_run] != 0} {
     reset_run $eth_ip_run
     launch_runs $eth_ip_run -jobs 4
     wait_on_run $eth_ip_run
@@ -81,5 +90,14 @@ report_bus_skew -warn_on_violation \
     -file [file join $project_root Signal.runs impl_1 m7_bus_skew.rpt]
 report_utilization -file [file join $project_root Signal.runs impl_1 m7_utilization.rpt]
 report_io -file [file join $project_root Signal.runs impl_1 m7_io.rpt]
+foreach adc_clock {adc_clk_a_out adc_clk_b_dual adc_clk_b_interleave} {
+    report_timing -from [get_clocks $adc_clock] -to [get_clocks adc_read_operating] \
+        -delay_type min_max -max_paths 4 \
+        -file [file join $project_root Signal.runs impl_1 ${adc_clock}_timing.rpt]
+}
+if {[llength [get_timing_paths -delay_type max -slack_lesser_than 0 -max_paths 1]] ||
+    [llength [get_timing_paths -delay_type min -slack_lesser_than 0 -max_paths 1]]} {
+    error "M8 timing failed; do not program this bitstream"
+}
 puts "M7_BUILD_COMPLETE"
 close_project

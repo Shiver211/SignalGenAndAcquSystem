@@ -37,24 +37,47 @@ set_property IOSTANDARD LVCMOS33 \
 set_property DRIVE 8 [get_ports {adc_clk_a adc_clk_b}]
 set_property SLEW FAST [get_ports {adc_clk_a adc_clk_b}]
 
-# ODDR 输出与内部 65MHz 同频，在 FPGA 管脚处建立两个源同步转发时钟。
+# 读时钟上电动态相移 224 步，MMCM VCO=1300MHz，每步 1/(56*FVCO)。
+# 在 BUFG 输出建立实际工作相位；初始化移相期间 sample_valid 始终为零。
+create_generated_clock -name adc_read_operating \
+    -source [get_pins u_clock_reset_m0/u_clk_wiz_m0/inst/mmcm_adv_inst/CLKOUT2] \
+    -edges {1 2 3} -edge_shift {3.076923 3.076923 3.076923} \
+    [get_pins u_clock_reset_m0/u_clk_wiz_m0/inst/clkout3_buf/O]
+
 create_generated_clock -name adc_clk_a_out \
     -source [get_pins u_ad9226_clock_forward/u_oddr_clk_a/C] \
     -divide_by 1 [get_ports adc_clk_a]
-create_generated_clock -name adc_clk_b_out \
+create_generated_clock -name adc_clk_b_dual \
     -source [get_pins u_ad9226_clock_forward/u_oddr_clk_b/C] \
     -divide_by 1 [get_ports adc_clk_b]
+create_generated_clock -name adc_clk_b_interleave -add \
+    -source [get_pins u_ad9226_clock_forward/u_oddr_clk_b/C] \
+    -master_clock [get_clocks -of_objects [get_pins u_ad9226_clock_forward/u_oddr_clk_b/C]] \
+    -divide_by 1 -invert [get_ports adc_clk_b]
+set_clock_groups -physically_exclusive \
+    -group [get_clocks adc_clk_b_dual] -group [get_clocks adc_clk_b_interleave]
 
-# 商家资料给出的 AD9226 数字输出延迟为 3.5ns..7.0ns。
-# 实机飞线差异最终通过 MMCM Fine Phase Shift 扫描并选择稳定窗口中心。
-set_input_delay -clock adc_clk_a_out -min 3.500 \
-    [get_ports {adc_data_a[*] adc_ora}]
-set_input_delay -clock adc_clk_a_out -max 7.000 \
-    [get_ports {adc_data_a[*] adc_ora}]
-set_input_delay -clock adc_clk_b_out -min 3.500 \
-    [get_ports {adc_data_b[*] adc_orb}]
-set_input_delay -clock adc_clk_b_out -max 7.000 \
-    [get_ports {adc_data_b[*] adc_orb}]
+# AD9226 Rev.B：输出相对上升沿延迟 3.5..7ns；A/B 数据和 OTR 同延迟。
+set_input_delay -clock adc_clk_a_out -min 3.500 [get_ports {adc_data_a[*] adc_ora}]
+set_input_delay -clock adc_clk_a_out -max 7.000 [get_ports {adc_data_a[*] adc_ora}]
+set_input_delay -clock adc_clk_b_dual -add_delay -min 3.500 [get_ports {adc_data_b[*] adc_orb}]
+set_input_delay -clock adc_clk_b_dual -add_delay -max 7.000 [get_ports {adc_data_b[*] adc_orb}]
+set_input_delay -clock adc_clk_b_interleave -add_delay -min 3.500 [get_ports {adc_data_b[*] adc_orb}]
+set_input_delay -clock adc_clk_b_interleave -add_delay -max 7.000 [get_ports {adc_data_b[*] adc_orb}]
+# 每路读到上一 ADC 周期的数据：setup 向后移一整周期。
+# 不回退 hold；仍检查下一笔数据变化与本次捕获边沿之间的保持时间。
+set_multicycle_path 2 -setup -end \
+    -from [get_clocks {adc_clk_a_out adc_clk_b_dual adc_clk_b_interleave}] \
+    -through [get_ports {adc_data_a[*] adc_ora adc_data_b[*] adc_orb}] \
+    -to [get_clocks adc_read_operating]
+# A 只使用上升沿；B 同相用上升沿，交织用下降沿。
+set_false_path -from [get_clocks adc_clk_a_out] \
+    -through [get_ports {adc_data_a[*] adc_ora}] -fall_to [get_clocks adc_read_operating]
+# 仅排除对应模式未使用的输入边沿，保留 IDDR 内部及后级的所有时序检查。
+set_false_path -from [get_clocks adc_clk_b_dual] \
+    -through [get_ports {adc_data_b[*] adc_orb}] -fall_to [get_clocks adc_read_operating]
+set_false_path -from [get_clocks adc_clk_b_interleave] \
+    -through [get_ports {adc_data_b[*] adc_orb}] -rise_to [get_clocks adc_read_operating]
 
 # 相位位置采用已寄存 Gray 码跨域；仅放宽两级同步器的第一级 D 端。
 set_false_path -quiet -to [get_pins -quiet -of_objects \

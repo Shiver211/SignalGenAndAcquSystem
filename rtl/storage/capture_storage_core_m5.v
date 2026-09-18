@@ -5,7 +5,7 @@ module capture_storage_core_m5 #(
     parameter integer RING_SAMPLES = 58_720_256,
     parameter [27:0] RING_BASE_APP_ADDR = 28'd0,
     parameter [31:0] INITIAL_SAMPLE_INDEX = 32'd0,
-    parameter integer FIFO_DEPTH = 2048,
+    parameter integer FIFO_DEPTH = 512,
     parameter integer FIFO_COUNT_WIDTH = $clog2(FIFO_DEPTH) + 1
 ) (
     input  wire        clk_adc,
@@ -85,12 +85,14 @@ module capture_storage_core_m5 #(
     wire reader_busy_adc;
     wire frame_done_pulse_ui;
 
-    wire [98:0] fifo_wr_data;
+    wire [98:0] sample_stream_data;
+    wire sample_stream_write, sample_stream_full;
+    wire [197:0] fifo_wr_data;
     wire fifo_wr_en;
     wire fifo_full;
     wire fifo_ip_overflow;
     wire fifo_wr_rst_busy;
-    wire [98:0] fifo_rd_data;
+    wire [197:0] fifo_rd_data;
     wire fifo_rd_en;
     wire fifo_empty;
     wire fifo_underflow;
@@ -210,9 +212,9 @@ module capture_storage_core_m5 #(
         .pretrigger_permille   (pretrigger_permille),
         .channel_mask          (channel_mask),
         .immediate_capture     (immediate_capture),
-        .stream_data           (fifo_wr_data),
-        .stream_wr_en          (fifo_wr_en),
-        .stream_full           (fifo_full),
+        .stream_data           (sample_stream_data),
+        .stream_wr_en          (sample_stream_write),
+        .stream_full           (sample_stream_full),
         .capture_active        (capture_active_adc),
         .triggered             (triggered_adc),
         .capture_aborted       (capture_aborted_adc),
@@ -224,9 +226,16 @@ module capture_storage_core_m5 #(
         .state_debug           (adc_state_debug)
     );
 
+    adc_beat_packer_m8 u_beat_packer (
+        .clk(clk_adc), .reset(fifo_reset),
+        .sample_data(sample_stream_data), .sample_write(sample_stream_write),
+        .sample_full(sample_stream_full), .beat_data(fifo_wr_data),
+        .beat_write(fifo_wr_en), .beat_full(fifo_full || fifo_wr_rst_busy)
+    );
+
     adc_async_fifo_m5 #(
         .FIFO_DEPTH (FIFO_DEPTH),
-        .DATA_WIDTH (99),
+        .DATA_WIDTH (198),
         .COUNT_WIDTH(FIFO_COUNT_WIDTH)
     ) u_adc_async_fifo_m5 (
         .reset         (fifo_reset),

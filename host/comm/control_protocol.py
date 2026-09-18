@@ -37,6 +37,11 @@ class Waveform(IntEnum):
     SQUARE = 2
 
 
+class SamplingMode(IntEnum):
+    DUAL_65 = 0
+    INTERLEAVED_130 = 1
+
+
 class DataMode(IntEnum):
     RAW = 0
     ENVELOPE = 1
@@ -148,6 +153,7 @@ def acquisition_payload(
     pretrigger_percent: float,
     *,
     channel_mask: int = 0x03,
+    sampling_mode: int | SamplingMode | None = None,
     commit: bool = True,
 ) -> bytes:
     if source not in (0, 1) or edge not in (0, 1):
@@ -160,10 +166,15 @@ def acquisition_payload(
         raise ValueError("预触发比例必须在 0..100%")
     if channel_mask not in (1, 2, 3):
         raise ValueError("通道掩码必须为 1(CH1)、2(CH2) 或 3(双通道)")
-    return struct.pack(
+    if sampling_mode not in (None, 0, 1):
+        raise ValueError("采样模式只能为 0 或 1")
+    if sampling_mode == 1 and (channel_mask != 1 or source != 0):
+        raise ValueError("交织模式固定使用 CH A 输入和触发")
+    payload = struct.pack(
         "<BHHBIHBB", source, threshold_code, hysteresis_code, edge,
         capture_depth, round(pretrigger_percent * 10), int(commit), channel_mask,
     )
+    return payload if sampling_mode is None else payload + bytes((int(sampling_mode),))
 
 
 def processing_payload(
@@ -225,6 +236,10 @@ def parse_device_status(payload: bytes) -> dict[str, object]:
         "adc_clock_alive": bool(flags & 0x20),
         "mmcm_locked": bool(flags & 0x40),
         "last_error": payload[6],
+        "interleave_supported": (payload[0], payload[1]) >= (1, 1),
+        "sampling_mode": payload[7] & 1,
+        "sample_ready": bool(payload[7] & 2),
+        "sample_overflow": bool(payload[7] & 4),
         "crc_error_count": struct.unpack_from("<I", payload, 8)[0],
         "uart_frame_error_count": struct.unpack_from("<I", payload, 12)[0],
         "command_error_count": struct.unpack_from("<I", payload, 16)[0],

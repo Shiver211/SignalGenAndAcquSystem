@@ -7,6 +7,7 @@ module measurement_m6 #(
     parameter integer SAMPLE_RATE_HZ = 65_000_000,
     parameter integer MIN_PERIODS    = 8
 ) (
+    input wire [31:0] sample_rate_hz,
     input  wire        clk,
     input  wire        reset,
     input  wire        config_update,
@@ -39,6 +40,12 @@ module measurement_m6 #(
     output reg         period_valid_b,
     output reg         calculation_overrun
 );
+
+    reg [31:0] window_sample_rate;
+    always @(posedge clk) begin
+        if (reset) window_sample_rate <= SAMPLE_RATE_HZ;
+        else if (config_update) window_sample_rate <= sample_rate_hz;
+    end
 
     localparam [3:0] S_IDLE          = 4'd0;
     localparam [3:0] S_START_MEAN_A  = 4'd1;
@@ -90,6 +97,22 @@ module measurement_m6 #(
     reg [31:0] latched_period_count_a;
     reg [31:0] latched_period_count_b;
 
+    // 周期除法期间预计算 Fs * 周期数；16x16 分块流水避免 130MHz 长乘法链。
+    reg [31:0] frequency_period_count;
+    (* use_dsp = "yes" *) reg [31:0] freq_ll, freq_lh, freq_hl, freq_hh;
+    reg [63:0] frequency_low_sum, frequency_high_sum, frequency_numerator;
+    always @(posedge clk) begin
+        if (state == S_START_PERIOD_A) frequency_period_count <= latched_period_count_a;
+        if (state == S_START_PERIOD_B) frequency_period_count <= latched_period_count_b;
+        freq_ll <= window_sample_rate[15:0] * frequency_period_count[15:0];
+        freq_lh <= window_sample_rate[15:0] * frequency_period_count[31:16];
+        freq_hl <= window_sample_rate[31:16] * frequency_period_count[15:0];
+        freq_hh <= window_sample_rate[31:16] * frequency_period_count[31:16];
+        frequency_low_sum <= {32'd0, freq_ll} + {16'd0, freq_lh, 16'd0};
+        frequency_high_sum <= {16'd0, freq_hl, 16'd0} + {freq_hh, 32'd0};
+        frequency_numerator <= frequency_low_sum + frequency_high_sum;
+    end
+
     reg divider_start;
     reg [63:0] divider_dividend;
     reg [63:0] divider_divisor;
@@ -101,7 +124,9 @@ module measurement_m6 #(
 
     wire [31:0] active_window =
         (window_samples == 32'd0) ? 32'd1 : window_samples;
-    wire window_last = sample_count == active_window - 1'b1;
+    reg [31:0] window_last_index;
+    always @(posedge clk) window_last_index <= active_window - 1'b1;
+    wire window_last = sample_count == window_last_index;
     localparam [11:0] MIN_HYSTERESIS = 12'd16;
     wire rising_a = previous_valid && thresholds_ready && !level_a &&
                     (code_a >= crossing_high_a);
@@ -132,14 +157,11 @@ module measurement_m6 #(
     // 用当前窗口的幅度学习下一窗口阈值。半滞回为 Vpp/4，
     // 即上下阈值约位于波形范围的 25% 和 75%。最小 16 LSB 避免
     // 零幅度时两个阈值重合。
-    wire [12:0] span_a_next = {1'b0, max_a_with_sample} -
-                              {1'b0, min_a_with_sample};
-    wire [12:0] span_b_next = {1'b0, max_b_with_sample} -
-                              {1'b0, min_b_with_sample};
-    wire [12:0] center_sum_a_next = {1'b0, min_a_with_sample} +
-                                    {1'b0, max_a_with_sample};
-    wire [12:0] center_sum_b_next = {1'b0, min_b_with_sample} +
-                                    {1'b0, max_b_with_sample};
+    // 先锁存本窗口 Min/Max，再在均值除法期间学习阈值。
+    wire [12:0] span_a_next = {1'b0, max_a} - {1'b0, min_a};
+    wire [12:0] span_b_next = {1'b0, max_b} - {1'b0, min_b};
+    wire [12:0] center_sum_a_next = {1'b0, min_a} + {1'b0, max_a};
+    wire [12:0] center_sum_b_next = {1'b0, min_b} + {1'b0, max_b};
     wire [11:0] center_a_next = center_sum_a_next[12:1];
     wire [11:0] center_b_next = center_sum_b_next[12:1];
     wire [11:0] quarter_span_a_next = span_a_next[11:2];
@@ -286,11 +308,6 @@ module measurement_m6 #(
                 end
 
                 if (window_last) begin
-                    thresholds_ready <= 1'b1;
-                    crossing_low_a   <= crossing_low_a_next;
-                    crossing_high_a  <= crossing_high_a_next;
-                    crossing_low_b   <= crossing_low_b_next;
-                    crossing_high_b  <= crossing_high_b_next;
                     if (state == S_IDLE) begin
                         measured_samples <= active_window;
                         min_a <= min_a_with_sample;
@@ -352,6 +369,11 @@ module measurement_m6 #(
                     state  <= S_START_MEAN_B;
                 end
                 S_START_MEAN_B: begin
+                    thresholds_ready <= 1'b1;
+                    crossing_low_a   <= crossing_low_a_next;
+                    crossing_high_a  <= crossing_high_a_next;
+                    crossing_low_b   <= crossing_low_b_next;
+                    crossing_high_b  <= crossing_high_b_next;
                     divider_dividend <= latched_sum_b;
                     divider_divisor  <= measured_samples;
                     divider_start    <= 1'b1;
@@ -377,7 +399,7 @@ module measurement_m6 #(
                     state <= S_START_FREQ_A;
                 end
                 S_START_FREQ_A: begin
-                    divider_dividend <= SAMPLE_RATE_HZ * latched_period_count_a;
+                    divider_dividend <= frequency_numerator;
                     divider_divisor  <= latched_period_sum_a;
                     divider_start    <= 1'b1;
                     state            <= S_WAIT_FREQ_A;
@@ -398,7 +420,7 @@ module measurement_m6 #(
                     state <= S_START_FREQ_B;
                 end
                 S_START_FREQ_B: begin
-                    divider_dividend <= SAMPLE_RATE_HZ * latched_period_count_b;
+                    divider_dividend <= frequency_numerator;
                     divider_divisor  <= latched_period_sum_b;
                     divider_start    <= 1'b1;
                     state            <= S_WAIT_FREQ_B;

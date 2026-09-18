@@ -1,86 +1,118 @@
 `timescale 1ns / 1ps
-// ---------------------------------------------------------------------------
-// 模块名  : ad9226_capture
-// 功能    : AD9226 双通道 ADC 数据采集前端
-//           对 A/B 两路 12bit 数据及超量程标志(OTR)做两级流水寄存，
-//           支持按通道使能掩码丢弃关闭通道的数据，并输出采样有效标志
-//           与采样计数，供后级 FIFO/DDR/网络路径使用。
-// 时钟域  : clk_adc_read_65m (65MHz ADC 读时钟)
-// 复位    : 高电平同步复位(在此时钟域下)
-// ---------------------------------------------------------------------------
-
+// 65MHz 双边沿锁存成对跨域；130MHz 域恢复逻辑样本顺序。
 module ad9226_capture (
-    input  wire        clk_adc_read_65m, // ADC 读时钟，65MHz，所有寄存器工作于此时钟域
-    input  wire        reset,            // 同步复位，高有效，清零流水线与计数器
-    input  wire [11:0] adc_data_a,      // A 通道 ADC 原始 12bit 数据输入(来自引脚)
-    input  wire [11:0] adc_data_b,      // B 通道 ADC 原始 12bit 数据输入(来自引脚)
-    input  wire        adc_otr_a,       // A 通道超量程标志输入，高表示输入超出量程
-    input  wire        adc_otr_b,       // B 通道超量程标志输入，高表示输入超出量程
-    input  wire [1:0]  channel_mask,    // 通道使能掩码：[0]对应A通道，[1]对应B通道，1=使能，0=关闭并清零
-    output wire [11:0] raw_a,           // A 通道原始码输出(经掩码处理后)
-    output wire [11:0] raw_b,           // B 通道原始码输出(经掩码处理后)
-    output wire [11:0] code_a,          // A 通道取反码输出(raw_a ^ 12'hFFF，用于补码/偏置转换)
-    output wire [11:0] code_b,          // B 通道取反码输出(raw_b ^ 12'hFFF，用于补码/偏置转换)
-    output wire        otr_a,           // A 通道超量程标志输出(经掩码处理后)
-    output wire        otr_b,           // B 通道超量程标志输出(经掩码处理后)
-    output reg         sample_valid,    // 采样有效标志，流水线填满后持续为高，每时钟对应一组采样
-    output reg  [31:0] sample_count     // 采样计数器，sample_valid 有效时每拍加 1，用于调试与对齐
+    input wire clk_adc_read_65m, reset,
+    input wire clk_sample_130m, reset_sample,
+    input wire phase_ready, interleave_enable, interleave_clock, clear_errors,
+    input wire [11:0] adc_data_a, adc_data_b,
+    input wire adc_otr_a, adc_otr_b,
+    input wire [1:0] channel_mask,
+    output wire [11:0] raw_a, raw_b,
+    output reg [11:0] code_a, code_b,
+    output reg otr_a, otr_b, sample_valid,
+    output reg [31:0] sample_count,
+    output wire sample_ready, overflow
 );
-
-    // 输入数据和 OTR 的第一级寄存器必须落入 IOB。
-    // IOB 寄存器紧靠引脚，可减小走线延迟，保证 65MHz 下可靠锁存 ADC 数据。
-    (* IOB = "TRUE" *) reg [11:0] raw_a_iob; // 第一级：A通道数据 IOB 锁存
-    (* IOB = "TRUE" *) reg [11:0] raw_b_iob; // 第一级：B通道数据 IOB 锁存
-    (* IOB = "TRUE" *) reg        otr_a_iob; // 第一级：A通道 OTR 标志 IOB 锁存
-    (* IOB = "TRUE" *) reg        otr_b_iob; // 第一级：B通道 OTR 标志 IOB 锁存
-    reg [11:0] raw_a_pipe;  // 第二级：A通道数据流水寄存器
-    reg [11:0] raw_b_pipe;  // 第二级：B通道数据流水寄存器
-    reg        otr_a_pipe;  // 第二级：A通道 OTR 流水寄存器
-    reg        otr_b_pipe;  // 第二级：B通道 OTR 流水寄存器
-    reg        valid_iob;   // 第一级有效指示：复位释放后拉高，用于产生延迟一拍的 sample_valid
-
-    // ---- 组合逻辑输出 ----
-    assign raw_a  = raw_a_pipe;          // 直接输出第二级 A 通道原始数据
-    assign raw_b  = raw_b_pipe;          // 直接输出第二级 B 通道原始数据
-    assign code_a = raw_a_pipe ^ 12'hFFF; // A通道按位取反，AD9226 偏置码转补码常用处理
-    assign code_b = raw_b_pipe ^ 12'hFFF; // B通道按位取反，AD9226 偏置码转补码常用处理
-    assign otr_a  = otr_a_pipe;          // 直接输出第二级 A 通道超量程标志
-    assign otr_b  = otr_b_pipe;          // 直接输出第二级 B 通道超量程标志
-
-    // ---- 两级流水时序逻辑 ----
+    wire mode_read, clock_mode_read, phase_ready_read, clear_read;
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(0)) u_mode_read
+        (.src_clk(1'b0), .src_in(interleave_enable), .dest_clk(clk_adc_read_65m), .dest_out(mode_read));
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(0)) u_clock_mode_read
+        (.src_clk(1'b0), .src_in(interleave_clock), .dest_clk(clk_adc_read_65m), .dest_out(clock_mode_read));
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(0)) u_phase_ready_read
+        (.src_clk(1'b0), .src_in(phase_ready), .dest_clk(clk_adc_read_65m), .dest_out(phase_ready_read));
+    xpm_cdc_pulse #(.DEST_SYNC_FF(2), .REG_OUTPUT(1), .RST_USED(1)) u_clear_read
+        (.src_clk(clk_sample_130m), .src_rst(reset_sample), .src_pulse(clear_errors),
+         .dest_clk(clk_adc_read_65m), .dest_rst(reset), .dest_pulse(clear_read));
+    reg mode_seen;
+    reg [8:0] settle_count;
+    reg overflow_read;
+    wire fifo_full, fifo_empty, wr_busy, rd_busy;
+    wire settled = settle_count[8] && (mode_seen == mode_read) &&
+                   (clock_mode_read == mode_read) && phase_ready_read && !reset;
     always @(posedge clk_adc_read_65m) begin
         if (reset) begin
-            // 同步复位：清空两级流水线、有效标志与计数器
-            raw_a_iob   <= 12'h000;
-            raw_b_iob   <= 12'h000;
-            otr_a_iob   <= 1'b0;
-            otr_b_iob   <= 1'b0;
-            raw_a_pipe  <= 12'h000;
-            raw_b_pipe  <= 12'h000;
-            otr_a_pipe  <= 1'b0;
-            otr_b_pipe  <= 1'b0;
-            valid_iob   <= 1'b0;
-            sample_valid <= 1'b0;
-            sample_count <= 32'd0;
+            mode_seen <= 0; settle_count <= 0; overflow_read <= 0;
         end else begin
-            // 第一级寄存器只负责可靠地锁存 ADC 引脚，不能在 IOB 前加入
-            // channel_mask 组合逻辑。关闭的通道在第二级立即丢弃，后续
-            // FIFO、DDR、处理和网络路径都不会采集或传输该路数据。
-            raw_a_iob   <= adc_data_a; // 第一级锁存 A 通道引脚数据
-            raw_b_iob   <= adc_data_b; // 第一级锁存 B 通道引脚数据
-            otr_a_iob   <= adc_otr_a;  // 第一级锁存 A 通道 OTR 引脚
-            otr_b_iob   <= adc_otr_b;  // 第一级锁存 B 通道 OTR 引脚
-            // 第二级：根据通道掩码选择保留或清零，实现关闭通道的数据丢弃
-            raw_a_pipe  <= channel_mask[0] ? raw_a_iob : 12'd0; // A通道使能时透传，否则输出 0
-            raw_b_pipe  <= channel_mask[1] ? raw_b_iob : 12'd0; // B通道使能时透传，否则输出 0
-            otr_a_pipe  <= channel_mask[0] ? otr_a_iob : 1'b0;  // A通道关闭时强制 OTR 为 0
-            otr_b_pipe  <= channel_mask[1] ? otr_b_iob : 1'b0;  // B通道关闭时强制 OTR 为 0
-            valid_iob   <= 1'b1;        // 第一拍后即表示流水线已填满
-            sample_valid <= valid_iob;  // 延迟一拍输出，与第二级数据对齐
-            if (valid_iob) begin
-                sample_count <= sample_count + 1'b1; // 有效期间每时钟计数加 1
+            mode_seen <= mode_read;
+            if (!phase_ready_read || mode_seen != mode_read || clock_mode_read != mode_read) begin
+                settle_count <= 0; overflow_read <= 0;
+            end else if (!settle_count[8]) settle_count <= settle_count + 1'b1;
+            if (clear_read) overflow_read <= 0;
+            if (settled && !wr_busy && fifo_full) overflow_read <= 1;
+        end
+    end
+    wire [12:0] a_rise, b_rise, b_fall;
+    wire [12:0] pins_a = {adc_otr_a, adc_data_a};
+    wire [12:0] pins_b = {adc_otr_b, adc_data_b};
+    genvar bit_index;
+    generate for (bit_index=0; bit_index<13; bit_index=bit_index+1) begin: g_capture
+        // 同一周期的上升沿和随后的下降沿一起在下一上升沿输出。
+        IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED"), .SRTYPE("SYNC")) u_a_iddr
+            (.C(clk_adc_read_65m), .CE(1'b1), .D(pins_a[bit_index]),
+             .R(reset), .S(1'b0), .Q1(a_rise[bit_index]), .Q2());
+        IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED"), .SRTYPE("SYNC")) u_b_iddr
+            (.C(clk_adc_read_65m), .CE(1'b1), .D(pins_b[bit_index]),
+             .R(reset), .S(1'b0), .Q1(b_rise[bit_index]), .Q2(b_fall[bit_index]));
+    end endgenerate
+    wire [12:0] selected_b = mode_read ? b_fall : b_rise;
+    // 取反仅修正模拟前端极性，码型仍为无符号偏置码。
+    wire [25:0] pair_in = {selected_b[12], selected_b[11:0] ^ 12'hfff,
+                          a_rise[12], a_rise[11:0] ^ 12'hfff};
+    wire [25:0] pair_out;
+    wire [6:0] pair_count;
+    wire pair_pop;
+    adc_async_fifo_m5 #(.FIFO_DEPTH(64), .DATA_WIDTH(26), .COUNT_WIDTH(7)) u_pair_fifo (
+        .reset(!settled), .wr_clk(clk_adc_read_65m), .wr_data(pair_in),
+        .wr_en(settled && !wr_busy && !fifo_full && !overflow_read),
+        .full(fifo_full), .overflow(), .wr_rst_busy(wr_busy), .wr_data_count(),
+        .rd_clk(clk_sample_130m), .rd_data(pair_out), .rd_en(pair_pop),
+        .empty(fifo_empty), .underflow(), .rd_rst_busy(rd_busy), .rd_data_count(pair_count)
+    );
+    wire settled_sample, mode_sample, overflow_sample;
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(1)) u_settled_sample
+        (.src_clk(clk_adc_read_65m), .src_in(settled), .dest_clk(clk_sample_130m), .dest_out(settled_sample));
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(1)) u_mode_sample
+        (.src_clk(clk_adc_read_65m), .src_in(mode_read), .dest_clk(clk_sample_130m), .dest_out(mode_sample));
+    xpm_cdc_single #(.DEST_SYNC_FF(2), .SRC_INPUT_REG(1)) u_overflow_sample
+        (.src_clk(clk_adc_read_65m), .src_in(overflow_read), .dest_clk(clk_sample_130m), .dest_out(overflow_sample));
+    reg running, second_sample, underflow_seen;
+    reg [12:0] held_b;
+    wire transport_ready = settled_sample && !rd_busy && (mode_sample == interleave_enable);
+    assign overflow = overflow_sample || underflow_seen;
+    assign sample_ready = running && transport_ready && !overflow;
+    assign pair_pop = sample_ready && !second_sample && !fifo_empty;
+    assign raw_a = code_a ^ 12'hfff;
+    assign raw_b = code_b ^ 12'hfff;
+    always @(posedge clk_sample_130m) begin
+        if (reset_sample) begin
+            running <= 0; second_sample <= 0; underflow_seen <= 0;
+            held_b <= 0; code_a <= 0; code_b <= 0; otr_a <= 0; otr_b <= 0;
+            sample_valid <= 0; sample_count <= 0;
+        end else begin
+            sample_valid <= 0;
+            if (clear_errors) underflow_seen <= 0;
+            if (!transport_ready) begin
+                running <= 0; second_sample <= 0; underflow_seen <= 0;
+            end else if (!running) begin
+                // 预填充抵消指针同步延迟，稳态每两拍只取一对。
+                if (pair_count >= 7'd8 && !overflow) running <= 1;
+            end else if (sample_ready) begin
+                second_sample <= !second_sample;
+                if (!second_sample) begin
+                    if (fifo_empty) begin underflow_seen <= 1; running <= 0; end
+                    else begin
+                        held_b <= pair_out[25:13];
+                        code_a <= channel_mask[0] ? pair_out[11:0] : 12'd0;
+                        otr_a <= channel_mask[0] && pair_out[12];
+                        code_b <= !interleave_enable && channel_mask[1] ? pair_out[24:13] : 12'd0;
+                        otr_b <= !interleave_enable && channel_mask[1] && pair_out[25];
+                        sample_valid <= 1; sample_count <= sample_count + 1'b1;
+                    end
+                end else if (interleave_enable) begin
+                    code_a <= held_b[11:0]; otr_a <= held_b[12]; code_b <= 0; otr_b <= 0;
+                    sample_valid <= 1; sample_count <= sample_count + 1'b1;
+                end
             end
         end
     end
-
 endmodule

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 // ---------------------------------------------------------------------------
 // 模块名  : clock_reset_m0
-// 功能    : M0 时钟复位顶层，基于 MMCM 生成三路时钟并做多时钟域复位同步，
+// 功能    : M0 时钟复位顶层，基于 MMCM 生成四路时钟并做多时钟域复位同步，
 //           同时支持 ADC 读时钟相位微调与时钟存活心跳指示。
 // 时钟    : sys_clk(输入) -> clk_sys_100m(系统)/clk_adc_65m(ADC发送)/
 //           clk_adc_read_65m(ADC采集，需相移对齐数据窗)
@@ -19,10 +19,13 @@ module clock_reset_m0 (
     output wire clk_sys_100m,      // 系统时钟 100MHz，供逻辑/DDS/网络等使用
     output wire clk_adc_65m,       // ADC 发送时钟 65MHz，经 ODDR 转发给 AD9226
     output wire clk_adc_read_65m,  // ADC 采集时钟 65MHz(可相移)，锁存 ADC 数据
+    output wire clk_sample_130m,
+    output wire rst_sample,
+    output reg phase_ready,
     output wire rst_sys,           // 系统域同步复位，高有效
     output wire rst_adc,           // ADC 发送域同步复位，高有效
     output wire rst_adc_read,      // ADC 采集域同步复位，高有效
-    output wire mmcm_locked,       // MMCM 锁定指示，高表示三路时钟已稳定
+    output wire mmcm_locked,       // MMCM 锁定指示，高表示四路时钟已稳定
     output wire phase_busy,        // 相移忙指示，高表示正在执行步进
     output wire phase_done_toggle, // 相移完成翻转，每完成一批次翻转一次
     output wire signed [15:0] phase_position, // 当前相位位置计数(相对步数，可正可负)
@@ -34,10 +37,11 @@ module clock_reset_m0 (
     wire phase_psincdec; // 相移方向，接 MMCM 的 PSINCDEC
     wire phase_psdone;   // 相移完成脉冲，来自 MMCM 的 PSDONE
 
-    // 时钟生成 IP：1 路输入生成 3 路输出，其中 out3 支持动态相移
+    // 时钟生成 IP：1 路输入生成 4 路输出，其中 out3 支持动态相移
     clk_wiz_m0 u_clk_wiz_m0 (
         .clk_out1 (clk_sys_100m),      // 输出1：系统 100MHz
         .clk_out2 (clk_adc_65m),       // 输出2：ADC 发送 65MHz
+        .clk_out4 (clk_sample_130m),
         .clk_out3 (clk_adc_read_65m),  // 输出3：ADC 采集 65MHz(可相移)
         .psclk    (clk_sys_100m),      // 相移控制时钟，用系统时钟即可
         .psen     (phase_psen),        // 相移使能
@@ -48,6 +52,16 @@ module clock_reset_m0 (
         .clk_in1  (sys_clk)            // 输入时钟
     );
 
+    reset_sync u_reset_sample (.clk(clk_sample_130m), .reset_n(mmcm_locked), .reset(rst_sample));
+    reg phase_done_seen;
+    always @(posedge clk_sys_100m) begin
+        if (rst_sys) begin phase_ready <= 1'b0; phase_done_seen <= 1'b0; end
+        else begin
+            phase_done_seen <= phase_done_toggle;
+            if (phase_busy) phase_ready <= 1'b0;
+            else if (phase_done_seen != phase_done_toggle) phase_ready <= 1'b1;
+        end
+    end
     // 系统域复位同步：以 locked 为异步复位源，时钟稳定后同步释放
     reset_sync u_reset_sys (
         .clk     (clk_sys_100m), // 目标时钟域
@@ -69,11 +83,10 @@ module clock_reset_m0 (
         .reset   (rst_adc_read)
     );
 
-    // M2 相位扫描选择 401 步作为稳定窗口中心；删除 VIO 后固定为该值。
-    // VCO=1300MHz 时每步约 13.736ps，401 步对应约 5.508ns。
-    // 上电自动执行 401 步初始相移，把读时钟搬到数据眼中心；之后响应外部请求微调。
+    // 401 步在 IDDR 最小延迟角有约 -0.8ns 保持违例；改为 224 步。
+    // VCO=1300MHz，每步 13.736ps，工作相位 3.076923ns，与 XDC 一致。
     mmcm_phase_shift_ctrl #(
-        .INITIAL_STEPS (10'd401) // 上电初始相移步数，0 表示跳过初始相移
+        .INITIAL_STEPS (10'd224) // 上电初始相移步数，0 表示跳过初始相移
     ) u_mmcm_phase_shift_ctrl (
         .clk            (clk_sys_100m),       // 控制逻辑时钟
         .reset          (rst_sys),            // 同步复位

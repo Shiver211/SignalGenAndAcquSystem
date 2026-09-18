@@ -43,6 +43,7 @@ module tb_measurement_m6;
         .SAMPLE_RATE_HZ(1024),
         .MIN_PERIODS(8)
     ) dut (
+        .sample_rate_hz(32'd1024),
         .clk(clk), .reset(reset), .config_update(1'b0), .enable(enable),
         .window_samples(WINDOW_SAMPLES), .sample_valid(sample_valid),
         .code_a(code_a), .code_b(code_b), .otr_a(1'b0), .otr_b(1'b0),

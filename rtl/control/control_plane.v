@@ -16,6 +16,8 @@ module control_plane #(
     input  wire         network_link_up,
     input  wire         adc_clock_alive,
     input  wire         mmcm_locked,
+    input wire adc_sample_ready, adc_processing_ready, adc_stream_overflow, adc_capture_busy,
+    output wire clear_pulse_adc,
     input  wire         adc_capture_done,
     input  wire [31:0]  dac_update_rate_ch1_hz,
     input  wire [31:0]  dac_update_rate_ch2_hz,
@@ -43,7 +45,7 @@ module control_plane #(
     output wire [15:0]  gain_q15_ch2,
     output wire signed [15:0] offset_code_ch2,
 
-    output wire [168:0] adc_config_active,
+    output wire [169:0] adc_config_active,
     output wire [15:0]  adc_config_apply_count,
     output wire [15:0]  adc_clear_count,
     output wire         adc_control_armed,
@@ -79,11 +81,17 @@ module control_plane #(
     wire [7:0] response_len;
     wire [MAX_PAYLOAD_BYTES * 8 - 1:0] response_payload;
 
-    wire [168:0] adc_config_source;
+    wire [169:0] adc_config_source;
     wire         adc_config_send;
     wire         adc_config_busy;
+    wire config_transport_busy;
+    reg config_pending_sys;
+    reg config_complete_adc;
+    reg apply_wait;
+    reg [5:0] apply_guard;
+    wire sample_ready_sys, processing_ready_sys, stream_overflow_sys, mode_sys, capture_busy_sys;
     wire         adc_config_done;
-    wire [168:0] adc_config_cdc_data;
+    wire [169:0] adc_config_cdc_data;
     wire         adc_config_cdc_update;
 
     wire arm_pulse_sys;
@@ -91,12 +99,39 @@ module control_plane #(
     wire clear_pulse_sys;
     wire arm_pulse_adc;
     wire stop_pulse_adc;
-    wire clear_pulse_adc;
     wire adc_armed_raw;
     wire adc_armed_sys;
     wire [15:0] adc_clear_count_raw;
     wire [15:0] adc_clear_count_sys;
 
+    assign adc_config_busy = config_transport_busy || config_pending_sys;
+    always @(posedge clk_sys) begin
+        if (reset_sys) config_pending_sys <= 0;
+        else if (adc_config_send) config_pending_sys <= 1;
+        else if (adc_config_done) config_pending_sys <= 0;
+    end
+    // 等配置已传播到前端及处理器，再确认提交；普通 CDC 收到数据并不表示就绪。
+    always @(posedge clk_adc) begin
+        if (reset_adc) begin apply_wait <= 0; apply_guard <= 0; config_complete_adc <= 0; end
+        else begin
+            config_complete_adc <= 0;
+            if (adc_config_cdc_update) begin apply_wait <= 1; apply_guard <= 0; end
+            else if (apply_wait) begin
+                if (!apply_guard[5]) apply_guard <= apply_guard + 1'b1;
+                else if (adc_sample_ready && adc_processing_ready && !adc_capture_busy) begin
+                    apply_wait <= 0; config_complete_adc <= 1;
+                end
+            end
+        end
+    end
+    xpm_cdc_pulse #(.DEST_SYNC_FF(2), .REG_OUTPUT(1), .RST_USED(1)) u_config_complete (
+        .src_clk(clk_adc), .src_rst(reset_adc), .src_pulse(config_complete_adc),
+        .dest_clk(clk_sys), .dest_rst(reset_sys), .dest_pulse(adc_config_done));
+    xpm_cdc_array_single #(.WIDTH(5), .DEST_SYNC_FF(2), .SRC_INPUT_REG(1)) u_adc_status (
+        .src_clk(clk_adc), .src_in({adc_sample_ready, adc_processing_ready, adc_stream_overflow,
+                                 adc_config_active[169], adc_capture_busy}),
+        .dest_clk(clk_sys), .dest_out({sample_ready_sys, processing_ready_sys, stream_overflow_sys,
+                                    mode_sys, capture_busy_sys}));
     assign protocol_error    = (last_error != 8'h00);
     assign adc_control_armed = adc_armed_sys;
     assign adc_control_armed_adc = adc_armed_raw;
@@ -167,10 +202,12 @@ module control_plane #(
         .arm_pulse                 (arm_pulse_sys),
         .stop_pulse                (stop_pulse_sys),
         .clear_pulse               (clear_pulse_sys),
-        .adc_armed_status          (adc_armed_sys),
+        .adc_armed_status          (adc_armed_sys || capture_busy_sys),
         .ddr_calibrated            (ddr_calibrated),
         .network_link_up           (network_link_up),
         .adc_clock_alive           (adc_clock_alive),
+        .adc_sample_ready(sample_ready_sys), .adc_processing_ready(processing_ready_sys),
+        .adc_stream_overflow(stream_overflow_sys), .adc_mode_status(mode_sys),
         .mmcm_locked               (mmcm_locked),
         .dac_update_rate_ch1_hz    (dac_update_rate_ch1_hz),
         .dac_update_rate_ch2_hz    (dac_update_rate_ch2_hz),
@@ -222,14 +259,14 @@ module control_plane #(
     );
 
     control_cdc #(
-        .WIDTH (169)
+        .WIDTH (170)
     ) u_control_cdc (
         .src_clk     (clk_sys),
         .src_reset   (reset_sys),
         .src_data    (adc_config_source),
         .src_send    (adc_config_send),
-        .src_busy    (adc_config_busy),
-        .src_done    (adc_config_done),
+        .src_busy    (config_transport_busy),
+        .src_done    (),
         .dest_clk    (clk_adc),
         .dest_reset  (reset_adc),
         .dest_data   (adc_config_cdc_data),
@@ -282,7 +319,7 @@ module control_plane #(
     );
 
     adc_control_regs #(
-        .CONFIG_WIDTH (169)
+        .CONFIG_WIDTH (170)
     ) u_adc_control_regs (
         .clk                (clk_adc),
         .reset              (reset_adc),

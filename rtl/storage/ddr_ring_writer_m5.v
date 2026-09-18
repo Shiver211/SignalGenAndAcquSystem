@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-// 将带帧标记的 RAW32 流合并为 MIG 128bit 写事务，并维护环形样本指针。
+// 接收采集域已打包的 128bit 数据，每条事务携带 1..4 个 RAW32 样本。
 module ddr_ring_writer_m5 #(
     parameter integer RING_SAMPLES = 58_720_256,
     parameter [27:0] RING_BASE_APP_ADDR = 28'd0,
@@ -10,7 +10,7 @@ module ddr_ring_writer_m5 #(
     input  wire         ui_reset,
     input  wire         init_calib_complete,
 
-    input  wire [98:0]  stream_data,
+    input  wire [197:0] stream_data,
     input  wire         stream_empty,
     input  wire         stream_rd_rst_busy,
     output wire         stream_rd_en,
@@ -52,8 +52,6 @@ module ddr_ring_writer_m5 #(
     reg [31:0] next_arm_start_index;
     reg [31:0] current_sample_index;
 
-    reg [127:0] beat_data;
-    reg [15:0]  beat_mask;
     reg [127:0] pending_data;
     reg [15:0]  pending_mask;
     reg [27:0]  pending_address;
@@ -65,12 +63,13 @@ module ddr_ring_writer_m5 #(
     reg [31:0] frame_depth_latched;
     reg [31:0] frame_trigger_index_latched;
 
-    wire stream_abort = stream_data[34];
-    wire stream_first = stream_data[33];
-    wire stream_last  = stream_data[32];
-    wire [31:0] stream_sample = stream_data[31:0];
-    wire [31:0] stream_depth = stream_data[66:35];
-    wire [31:0] stream_trigger_index = stream_data[98:67];
+    wire stream_abort = stream_data[133];
+    wire stream_first = stream_data[132];
+    wire stream_last = stream_data[131];
+    wire [2:0] stream_count = stream_data[130:128];
+    wire [127:0] stream_samples = stream_data[127:0];
+    wire [31:0] stream_depth = stream_data[165:134];
+    wire [31:0] stream_trigger_index = stream_data[197:166];
 
     function [31:0] ring_next;
         input [31:0] sample_index;
@@ -126,46 +125,28 @@ module ddr_ring_writer_m5 #(
         end
     endfunction
 
-    function [127:0] insert_sample;
-        input [127:0] original;
-        input [1:0] lane;
-        input [31:0] sample_value;
+    function [15:0] count_mask;
+        input [2:0] count;
         begin
-            insert_sample = original;
-            case (lane)
-                2'd0: insert_sample[31:0]    = sample_value;
-                2'd1: insert_sample[63:32]   = sample_value;
-                2'd2: insert_sample[95:64]   = sample_value;
-                default: insert_sample[127:96] = sample_value;
+            case (count)
+                1: count_mask = 16'hfff0;
+                2: count_mask = 16'hff00;
+                3: count_mask = 16'hf000;
+                4: count_mask = 16'h0000;
+                default: count_mask = 16'hffff;
             endcase
         end
     endfunction
-
-    function [15:0] enable_lane;
-        input [15:0] original_mask;
-        input [1:0] lane;
-        begin
-            enable_lane = original_mask;
-            case (lane)
-                2'd0: enable_lane[3:0]   = 4'b0000;
-                2'd1: enable_lane[7:4]   = 4'b0000;
-                2'd2: enable_lane[11:8]  = 4'b0000;
-                default: enable_lane[15:12] = 4'b0000;
-            endcase
-        end
-    endfunction
-
     wire can_consume_stream = init_calib_complete && !stream_rd_rst_busy &&
                               !stream_empty &&
                               ((state == S_IDLE) || (state == S_FILL));
     assign stream_rd_en = can_consume_stream;
     assign state_debug = state;
 
-    wire [127:0] updated_beat_data =
-        insert_sample(beat_data, current_sample_index[1:0], stream_sample);
-    wire [15:0] updated_beat_mask =
-        enable_lane(beat_mask, current_sample_index[1:0]);
-    wire [31:0] next_sample_after_stream = ring_next(current_sample_index);
+    wire [31:0] packet_start = stream_first ? next_arm_start_index : current_sample_index;
+    wire [32:0] packet_end = {1'b0, packet_start} + stream_count;
+    wire [31:0] packet_next = (packet_end >= RING_SAMPLES)
+        ? packet_end - RING_SAMPLES : packet_end[31:0];
 
     wire write_cmd_accept = (state == S_WRITE) && !write_cmd_sent && app_rdy;
     wire write_data_accept = (state == S_WRITE) && !write_data_sent && app_wdf_rdy;
@@ -202,8 +183,6 @@ module ddr_ring_writer_m5 #(
             next_arm_start_index          <= ring_align_beat(INITIAL_SAMPLE_INDEX);
             current_sample_index          <= 32'd0;
             current_sample_index_debug    <= 32'd0;
-            beat_data                     <= 128'd0;
-            beat_mask                     <= 16'hFFFF;
             pending_data                  <= 128'd0;
             pending_mask                  <= 16'hFFFF;
             pending_address               <= RING_BASE_APP_ADDR;
@@ -232,74 +211,36 @@ module ddr_ring_writer_m5 #(
             frame_done_pulse <= 1'b0;
 
             case (state)
-                S_IDLE: begin
-                    capture_active <= 1'b0;
+                S_IDLE, S_FILL: begin
                     if (can_consume_stream) begin
                         if (stream_abort) begin
-                            capture_aborted  <= 1'b1;
+                            capture_active <= 1'b0;
+                            capture_aborted <= 1'b1;
+                            frame_valid <= 1'b0;
+                            next_arm_start_index <= ring_align_beat(current_sample_index);
                             frame_done_pulse <= 1'b1;
-                        end else if (stream_first) begin
-                            capture_active              <= 1'b1;
-                            capture_aborted             <= 1'b0;
-                            frame_valid                 <= 1'b0;
-                            frame_depth_latched         <= stream_depth;
-                            frame_trigger_index_latched <= stream_trigger_index;
-                            capture_samples_written     <= 32'd1;
-                            current_sample_index        <= ring_next(next_arm_start_index);
-                            current_sample_index_debug  <= ring_next(next_arm_start_index);
-                            beat_data                   <= insert_sample(
-                                128'd0, next_arm_start_index[1:0], stream_sample);
-                            beat_mask                   <= enable_lane(
-                                16'hFFFF, next_arm_start_index[1:0]);
-
-                            if (stream_last || (next_arm_start_index[1:0] == 2'd3)) begin
-                                pending_data <= insert_sample(
-                                    128'd0, next_arm_start_index[1:0], stream_sample);
-                                pending_mask <= enable_lane(
-                                    16'hFFFF, next_arm_start_index[1:0]);
-                                pending_address <= sample_to_app_addr(next_arm_start_index);
-                                pending_next_sample_index <= ring_next(next_arm_start_index);
-                                pending_last   <= stream_last;
-                                write_cmd_sent <= 1'b0;
-                                write_data_sent <= 1'b0;
-                                state <= S_WRITE;
+                            state <= S_IDLE;
+                        end else if (stream_first || state == S_FILL) begin
+                            if (stream_first) begin
+                                capture_active <= 1'b1;
+                                capture_aborted <= 1'b0;
+                                frame_valid <= 1'b0;
+                                frame_depth_latched <= stream_depth;
+                                frame_trigger_index_latched <= stream_trigger_index;
+                                capture_samples_written <= stream_count;
                             end else begin
-                                state <= S_FILL;
+                                capture_samples_written <= capture_samples_written + stream_count;
                             end
-                        end
-                    end
-                end
-
-                S_FILL: begin
-                    if (can_consume_stream) begin
-                        if (stream_abort || stream_first) begin
-                            capture_active          <= 1'b0;
-                            capture_aborted         <= 1'b1;
-                            next_arm_start_index    <= ring_align_beat(current_sample_index);
-                            beat_data               <= 128'd0;
-                            beat_mask               <= 16'hFFFF;
-                            frame_done_pulse        <= 1'b1;
-                            state                   <= S_IDLE;
-                        end else begin
-                            beat_data <= updated_beat_data;
-                            beat_mask <= updated_beat_mask;
-                            current_sample_index <= next_sample_after_stream;
-                            current_sample_index_debug <= next_sample_after_stream;
-                            if (capture_samples_written != 32'hFFFF_FFFF) begin
-                                capture_samples_written <=
-                                    capture_samples_written + 1'b1;
-                            end
-
-                            if (stream_last || (current_sample_index[1:0] == 2'd3)) begin
-                                pending_data   <= updated_beat_data;
-                                pending_mask   <= updated_beat_mask;
-                                pending_address <= sample_to_app_addr(current_sample_index);
-                                pending_next_sample_index <= next_sample_after_stream;
-                                pending_last   <= stream_last;
-                                write_cmd_sent <= 1'b0;
-                                write_data_sent <= 1'b0;
-                                state <= S_WRITE;
-                            end
+                            current_sample_index <= packet_next;
+                            current_sample_index_debug <= packet_next;
+                            pending_data <= stream_samples;
+                            pending_mask <= count_mask(stream_count);
+                            pending_address <= sample_to_app_addr(packet_start);
+                            pending_next_sample_index <= packet_next;
+                            pending_last <= stream_last;
+                            write_cmd_sent <= 1'b0;
+                            write_data_sent <= 1'b0;
+                            state <= S_WRITE;
                         end
                     end
                 end
@@ -308,8 +249,6 @@ module ddr_ring_writer_m5 #(
                     if (write_transaction_done) begin
                         write_cmd_sent  <= 1'b0;
                         write_data_sent <= 1'b0;
-                        beat_data       <= 128'd0;
-                        beat_mask       <= 16'hFFFF;
 
                         if (pending_last) begin
                             capture_active         <= 1'b0;

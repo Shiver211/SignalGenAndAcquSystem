@@ -12,7 +12,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
 
 from host.comm.control_protocol import (
-    Command, DataMode, Response, Waveform, acquisition_payload,
+    Command, DataMode, Response, StatusCode, Waveform, acquisition_payload,
     generator_payload, parse_device_status, processing_payload,
     raw_request_payload, retransmit_payload,
 )
@@ -23,7 +23,7 @@ from host.comm.data_protocol import (
 from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
 from host.config import (
-    ADC_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
+    ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
     PC_IP, UART_BAUD, UDP_PORT,
 )
 from host.core.waveform import (
@@ -81,6 +81,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._uart_connected = False
         self._continuous_running = False
         self._acquisition_mode = AcquisitionMode.CONTINUOUS
+        self._sampling_mode = 0
+        self._interleave_supported = False
+        self._status_received = False
+        self._mode_switching = False
+        self._mode_steps = []
+        self._mode_token = None
+        self._mode_target = 0
+        self._mode_deadline = 0.0
+        self._mode_command = None
+        self._mode_retry = QtCore.QTimer(self)
+        self._mode_retry.setSingleShot(True)
+        self._mode_retry.timeout.connect(self._send_mode_step)
         self._manual_busy = False
         self._manual_retried = False
         self.settings = settings or QtCore.QSettings("FPGA Signal System", "Host")
@@ -187,6 +199,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acquisition_mode_combo = QtWidgets.QComboBox()
         self.acquisition_mode_combo.addItem("连续", AcquisitionMode.CONTINUOUS)
         self.acquisition_mode_combo.addItem("手动", AcquisitionMode.MANUAL)
+        self.sampling_mode_combo = QtWidgets.QComboBox()
+        self.sampling_mode_combo.addItems(["双通道 65 MSps", "INA 交织 130 MSps"])
+        self.sampling_mode_combo.setEnabled(False)
+        self.sampling_hint = QtWidgets.QLabel("双通道：跳帽 B–C")
+        self.sampling_hint.setWordWrap(True)
         self.channel_mode_combo = QtWidgets.QComboBox()
         self.channel_mode_combo.addItem("双通道", ChannelDisplayMode.BOTH)
         self.channel_mode_combo.addItem("CH1", ChannelDisplayMode.CH1)
@@ -228,6 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capture_button = QtWidgets.QPushButton("开始采集")
         self.capture_progress = QtWidgets.QLabel("")
         form.addRow("采集模式", self.acquisition_mode_combo)
+        form.addRow("采样模式", self.sampling_mode_combo)
+        form.addRow(self.sampling_hint)
         form.addRow("通道模式", self.channel_mode_combo)
         form.addRow("CH1 电压", self.ch1_vdiv_combo)
         form.addRow("CH1 位置", self.ch1_position_spin)
@@ -360,6 +379,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capture_button.clicked.connect(self._start_manual_capture)
         self.acquisition_mode_combo.currentIndexChanged.connect(self._on_acquisition_mode_changed)
         self.timebase_combo.currentTextChanged.connect(self._set_timebase)
+        self.sampling_mode_combo.currentIndexChanged.connect(self._change_sampling_mode)
         self.channel_mode_combo.currentIndexChanged.connect(self._set_channel_mode)
         self.ch1_vdiv_combo.currentIndexChanged.connect(lambda: self._set_vdiv(1))
         self.ch2_vdiv_combo.currentIndexChanged.connect(lambda: self._set_vdiv(2))
@@ -379,7 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.serial_link.connection_changed.connect(self._on_uart_connection)
         self.serial_link.response_received.connect(self._on_response)
-        self.serial_link.request_failed.connect(lambda _, error: self.statusBar().showMessage(error, 5000))
+        self.serial_link.request_failed.connect(self._on_request_failed)
         self.udp_receiver.running_changed.connect(self._on_udp_running)
         self.udp_receiver.frame_received.connect(self._on_frame)
         self.udp_receiver.packet_error.connect(lambda error: self.statusBar().showMessage(error, 3000))
@@ -431,7 +451,108 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.serial_link.send_command(Command.SET_GENERATOR, payload)
 
+    @property
+    def sample_rate_hz(self) -> int:
+        return INTERLEAVE_SAMPLE_RATE_HZ if self._sampling_mode else ADC_SAMPLE_RATE_HZ
+
+    def _change_sampling_mode(self, mode: int) -> None:
+        if self._mode_switching or mode == self._sampling_mode:
+            return
+        if not self._uart_connected or not self._interleave_supported or self._manual_busy:
+            self.sampling_mode_combo.blockSignals(True)
+            self.sampling_mode_combo.setCurrentIndex(self._sampling_mode)
+            self.sampling_mode_combo.blockSignals(False)
+            self.statusBar().showMessage("请先连接支持交织的固件，并等待当前采集上传结束", 5000)
+            return
+        self._mode_switching = True
+        self._mode_deadline = monotonic() + 30.0
+        self._mode_target = mode
+        self._continuous_running = False
+        self.sampling_mode_combo.setEnabled(False)
+        self.run_button.setEnabled(False)
+        self.capture_button.setEnabled(False)
+        self.udp_receiver.discard_pending()
+        self._clear_continuous_measurement()
+        mask = 1 if mode else 3
+        rate = INTERLEAVE_SAMPLE_RATE_HZ if mode else ADC_SAMPLE_RATE_HZ
+        depth = max(1, min(RAW_MAX_SAMPLES, int(ceil(rate * float(self.timebase_combo.currentData()) * 10))))
+        self._mode_steps = [
+            (Command.STOP, b""),
+            (Command.ENVELOPE_ENABLE, b"\x00"),
+            (Command.SET_ACQUISITION, acquisition_payload(
+                0, self.threshold_spin.value(), self.hysteresis_spin.value(),
+                self.trigger_edge.currentIndex(), depth, self.pretrigger_spin.value(),
+                channel_mask=mask, sampling_mode=mode, commit=True)),
+        ]
+        self._send_mode_step()
+
+    def _send_mode_step(self) -> None:
+        if not self._mode_switching:
+            return
+        if self._mode_steps:
+            command, payload = self._mode_steps.pop(0)
+            self._mode_command = (command, payload)
+            self._mode_token = self.serial_link.send_command(command, payload)
+            return
+        self._mode_retry.stop()
+        self._sampling_mode = self._mode_target
+        self._mode_switching = False
+        self._mode_token = None
+        self._sync_sampling_widgets()
+        self.udp_receiver.discard_pending()
+        self.current_frame = None
+        self.plot_widget.clear_frame()
+        self.sampling_hint.setText(
+            "已停止。请将跳帽切到 A–B，信号接 INA，然后点击运行。" if self._sampling_mode else
+            "已停止。请将跳帽切到 B–C，信号接 INA/INB，然后点击运行。")
+        self.statusBar().showMessage("模式已切换，完成跳帽调整后手动运行", 8000)
+
+    def _sync_sampling_widgets(self) -> None:
+        self.sampling_hint.setText("交织：跳帽 A–B，信号接 INA。" if self._sampling_mode else
+                                  "双通道：跳帽 B–C，信号接 INA/INB。")
+        self.sampling_mode_combo.blockSignals(True)
+        self.sampling_mode_combo.setCurrentIndex(self._sampling_mode)
+        self.sampling_mode_combo.blockSignals(False)
+        self.sampling_mode_combo.setEnabled(self._uart_connected and self._interleave_supported and not self._mode_switching)
+        self.channel_mode_combo.blockSignals(True)
+        self.channel_mode_combo.setCurrentIndex(1 if self._sampling_mode else 0)
+        self.channel_mode_combo.blockSignals(False)
+        self.channel_mode_combo.setEnabled(not self._sampling_mode and not self._mode_switching)
+        self.plot_widget.set_channel_mode(self.channel_mode_combo.currentData())
+        self._update_channel_controls()
+        # DDR 容量固定；130 MSps 的最长记录约为 451.7 ms。
+        self.duration_spin.setMaximum(min(MANUAL_MAX_MS, RAW_MAX_SAMPLES * 1000 // self.sample_rate_hz))
+        self.timebase_combo.blockSignals(True)
+        last_enabled = 0
+        for index in range(self.timebase_combo.count()):
+            allowed = self.timebase_combo.itemData(index) * 10 * self.sample_rate_hz <= RAW_MAX_SAMPLES
+            self.timebase_combo.model().item(index).setEnabled(allowed)
+            if allowed:
+                last_enabled = index
+        if self.timebase_combo.currentIndex() > last_enabled:
+            self.timebase_combo.setCurrentIndex(last_enabled)
+        self.timebase_combo.blockSignals(False)
+        self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
+        self.run_button.setEnabled(not self._mode_switching)
+        self.capture_button.setEnabled(not self._mode_switching)
+
+    def _fail_mode_switch(self, message: str) -> None:
+        self._mode_retry.stop()
+        self._mode_switching = False
+        self._mode_steps.clear()
+        self._mode_token = None
+        self._sync_sampling_widgets()
+        self.sampling_hint.setText("切换失败，保持停止：" + message)
+        self._query_status()
+
+    def _on_request_failed(self, token: int, error: str) -> None:
+        if self._mode_switching and token == self._mode_token:
+            self._fail_mode_switch(error)
+        self.statusBar().showMessage(error, 5000)
+
     def _channel_mask(self) -> int:
+        if self._sampling_mode:
+            return 1
         return {
             ChannelDisplayMode.CH1: 0x01,
             ChannelDisplayMode.CH2: 0x02,
@@ -440,22 +561,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _manual_capture_depth(self) -> int:
         duration_s = min(MANUAL_MAX_SECONDS, max(0.001, self.duration_spin.value() / 1000.0))
-        return max(1, min(RAW_MAX_SAMPLES, int(round(ADC_SAMPLE_RATE_HZ * duration_s))))
+        return max(1, min(RAW_MAX_SAMPLES, int(round(self.sample_rate_hz * duration_s))))
 
     def _apply_acquisition(self) -> None:
+        if self._mode_switching:
+            return
         self._clear_continuous_measurement()
         was_continuous = self._continuous_running
         if self._uart_connected:
             self.serial_link.send_command(Command.STOP)
         channel_mask = self._channel_mask()
         time_per_div = float(self.timebase_combo.currentData())
-        requested_depth = int(ceil(ADC_SAMPLE_RATE_HZ * time_per_div * 10.0))
+        requested_depth = int(ceil(self.sample_rate_hz * time_per_div * 10.0))
         capture_depth = max(1, min(RAW_MAX_SAMPLES, requested_depth))
         self.serial_link.send_command(Command.SET_ACQUISITION, acquisition_payload(
             self.trigger_source.currentIndex(), self.threshold_spin.value(),
             self.hysteresis_spin.value(), self.trigger_edge.currentIndex(),
             capture_depth, self.pretrigger_spin.value(),
-            channel_mask=channel_mask, commit=False,
+            channel_mask=channel_mask, sampling_mode=(self._sampling_mode if self._interleave_supported else None), commit=False,
         ))
         self.depth_spin.setValue(capture_depth)
         self.display_points_spin.setValue(
@@ -474,6 +597,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.serial_link.send_command(Command.ENVELOPE_ENABLE, b"\x01")
 
     def _run_acquisition(self) -> None:
+        if self._mode_switching:
+            return
         self.acquisition_mode_combo.setCurrentIndex(AcquisitionMode.CONTINUOUS)
         self.mode_combo.setCurrentIndex(DataMode.ENVELOPE)
         self._apply_acquisition()
@@ -520,11 +645,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 label.setVisible(not manual)
             widget.setVisible(not manual)
         self.acquisition_mode_combo.setEnabled(not self._manual_busy)
-        self.channel_mode_combo.setEnabled(not self._manual_busy)
+        self.channel_mode_combo.setEnabled(not self._manual_busy and not self._sampling_mode and not self._mode_switching)
+        self.sampling_mode_combo.setEnabled(self._uart_connected and self._interleave_supported and not self._manual_busy and not self._mode_switching)
         self.capture_button.setEnabled(manual and not self._manual_busy)
         self.duration_spin.setEnabled(manual and not self._manual_busy)
 
     def _start_manual_capture(self) -> None:
+        if self._mode_switching:
+            return
         if self._manual_busy:
             return
         self._continuous_running = False
@@ -543,13 +671,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.serial_link.send_command(Command.SET_ACQUISITION, acquisition_payload(
             self.trigger_source.currentIndex(), self.threshold_spin.value(),
             self.hysteresis_spin.value(), self.trigger_edge.currentIndex(),
-            capture_depth, 0.0, channel_mask=channel_mask, commit=False,
+            capture_depth, 0.0, channel_mask=channel_mask, sampling_mode=(self._sampling_mode if self._interleave_supported else None), commit=False,
         ))
         self.serial_link.send_command(Command.SET_PROCESSING, processing_payload(
             DataMode.RAW, 1, 1, self.refresh_spin.value(), commit=True,
         ))
         self.serial_link.send_command(Command.ARM)
-        duration_s = capture_depth / float(ADC_SAMPLE_RATE_HZ)
+        duration_s = capture_depth / float(self.sample_rate_hz)
         upload_s = capture_depth * (2 if channel_mask in (1, 2) else 4) / 8_000_000
         self._manual_timeout.start(int((duration_s + upload_s + 3.0) * 1000))
         self.statusBar().showMessage("手动采集中")
@@ -588,13 +716,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_uart_connection(self, connected: bool, detail: str) -> None:
         self._uart_connected = connected
+        self._interleave_supported = False
+        self._status_received = False
+        if not connected:
+            self._mode_retry.stop()
+            self._mode_switching = False
+            self._mode_steps.clear()
+            self._mode_token = None
+            self._continuous_running = False
+            self._sync_sampling_widgets()
+        self.sampling_mode_combo.setEnabled(False)
         self._clear_continuous_measurement()
         if connected:
             self.settings.setValue("connection/serial_port", detail)
-            # FPGA 可能还保留上一次会话的显示点数（例如 100 点）。
-            # 连接后立即按当前 UI 时基同步一次，避免旧配置继续驱动
-            # 新窗口；延迟一个事件循环周期以确保串口工作线程已就绪。
-            QtCore.QTimer.singleShot(100, self._sync_scope_configuration)
+            # 先读取实际模式；用户确认跳帽位置后再手动运行。
+            QtCore.QTimer.singleShot(100, self._query_status)
         self.uart_button.setText("断开 UART" if connected else "连接 UART")
         self.status_labels["uart"].setText("已连接" if connected else "断开")
         self.statusBar().showMessage(detail, 3000)
@@ -612,19 +748,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.udp_button.setText("停止 UDP" if running else "启动 UDP")
         self.statusBar().showMessage(detail, 3000)
 
-    def _on_response(self, _: int, response: Response) -> None:
+    def _on_response(self, token: int, response: Response) -> None:
+        if self._mode_switching and token == self._mode_token:
+            if response.ok:
+                self._send_mode_step()
+            elif response.command == Command.SET_ACQUISITION and response.status == StatusCode.BUSY and monotonic() < self._mode_deadline:
+                # STOP 后旧 RAW 帧可能仍在上传；等待传输结束再提交模式。
+                self._mode_steps.insert(0, self._mode_command)
+                self._mode_retry.start(100)
+                self.statusBar().showMessage("正在等待 RAW 上传完成，再切换采样模式")
+            else:
+                self._fail_mode_switch(response.status_name)
+            return
         if not response.ok:
             self.statusBar().showMessage(f"命令 0x{response.command:02X}: {response.status_name}", 5000)
             return
         if response.command == Command.QUERY_STATUS:
             status = parse_device_status(response.payload)
+            first_status = not self._status_received
+            self._status_received = True
+            self._interleave_supported = bool(status["interleave_supported"])
+            if not self._mode_switching:
+                actual_mode = int(status["sampling_mode"]) if self._interleave_supported else 0
+                if actual_mode != self._sampling_mode or first_status:
+                    self._sampling_mode = actual_mode
+                    self._sync_sampling_widgets()
             self.status_labels["phy"].setText("已连接" if status["network_link_up"] else "断开")
             self.status_labels["mig"].setText("已校准" if status["ddr_calibrated"] else "未校准")
             self.status_labels["capture"].setText("ARM" if status["adc_armed"] else ("忙" if status["control_busy"] else "空闲"))
-            self.status_labels["adc"].setText("正常" if status["adc_clock_alive"] else "异常")
+            if self._interleave_supported:
+                self.status_labels["adc"].setText("溢出" if status["sample_overflow"] else
+                                                  ("就绪" if status["sample_ready"] else "未就绪"))
+            else:
+                self.status_labels["adc"].setText("正常" if status["adc_clock_alive"] else "异常")
             self.status_labels["mmcm"].setText("锁定" if status["mmcm_locked"] else "未锁定")
 
     def _on_frame(self, frame: CompletedFrame, persist_measurement: bool = True) -> None:
+        if persist_measurement and (self._mode_switching or bool(frame.header.flags & 0x0100) != bool(self._sampling_mode)):
+            return
         is_raw = frame.header.sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
         if is_raw:
             self.latest_raw_frame_id = frame.header.frame_id
@@ -878,8 +1039,8 @@ class MainWindow(QtWidgets.QMainWindow):
         window = 10.0 * float(seconds_per_div)
         # 与 SET_ACQUISITION 相同：十格窗口按 ADC 样点取整，10 ns/div
         # 的 6.5 点会变成 7 点，不能拿理想 100 ns 去卡 5%。
-        capture = max(1, int(ceil(ADC_SAMPLE_RATE_HZ * window)))
-        expected = capture / float(ADC_SAMPLE_RATE_HZ)
+        capture = max(1, min(RAW_MAX_SAMPLES, int(ceil(self.sample_rate_hz * window))))
+        expected = capture / float(self.sample_rate_hz)
         # 桶大小取整会产生很小的误差，5% 足以区分相邻时基的旧帧。
         return abs(actual - expected) <= expected * 0.05
 
@@ -935,7 +1096,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.reset_cal_buttons[2],
             ):
                 widget.setEnabled(ch2_active)
-        self.trigger_source.setEnabled(mode == ChannelDisplayMode.BOTH)
+        self.channel_mode_combo.setEnabled(not self._sampling_mode and not self._mode_switching)
+        self.trigger_source.setEnabled(not self._sampling_mode and mode == ChannelDisplayMode.BOTH)
         if mode == ChannelDisplayMode.CH1:
             self.trigger_source.setCurrentIndex(0)
         elif mode == ChannelDisplayMode.CH2:
@@ -957,6 +1119,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("当前没有可保存帧", 3000)
             return
         config = {
+            "sampling_mode": self._sampling_mode,
             "mode": self.mode_combo.currentText(), "decimation": int(self.decimation_combo.currentText()),
             "display_points": self.display_points_spin.value(), "refresh_hz": self.refresh_spin.value(),
         }
@@ -989,6 +1152,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_records()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._mode_retry.stop()
+        self._mode_switching = False
         self.status_timer.stop()
         self.serial_link.disconnect_port()
         self.udp_receiver.stop()

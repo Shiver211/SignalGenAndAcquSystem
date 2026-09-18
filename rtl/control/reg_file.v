@@ -35,7 +35,7 @@ module reg_file #(
     output reg  [15:0]                          gain_q15_ch2,
     output reg  signed [15:0]                   offset_code_ch2,
 
-    output wire [168:0]                         adc_config_data,
+    output wire [169:0]                         adc_config_data,
     output reg                                  adc_config_send,
     input  wire                                 adc_config_busy,
     input  wire                                 adc_config_done,
@@ -43,6 +43,7 @@ module reg_file #(
     output reg                                  stop_pulse,
     output reg                                  clear_pulse,
 
+    input wire adc_sample_ready, adc_processing_ready, adc_stream_overflow, adc_mode_status,
     input  wire                                 adc_armed_status,
     input  wire                                 ddr_calibrated,
     input  wire                                 network_link_up,
@@ -128,6 +129,7 @@ module reg_file #(
     reg [15:0] gain_shadow_ch2;
     reg signed [15:0] offset_shadow_ch2;
 
+    reg interleave_shadow, interleave_active;
     reg        trigger_source_shadow;
     reg [11:0] trigger_threshold_shadow;
     reg [11:0] trigger_hysteresis_shadow;
@@ -179,6 +181,11 @@ module reg_file #(
     wire [15:0] acquisition_pretrigger = command_payload[10 * 8 +: 16];
     wire [7:0]  acquisition_channel_mask = command_payload[13 * 8 +: 8];
 
+    wire acquisition_interleave = (command_len == 8'd15) && command_payload[14*8];
+    wire acquisition_mode_invalid = (command_len == 8'd15) &&
+        ((command_payload[14*8 +: 8] > 1) ||
+         (acquisition_interleave && (acquisition_channel_mask != 1 || payload_0 != 0)));
+    wire mode_change_busy = envelope_enable_active || !raw_upload_ready || raw_upload_request;
     wire [31:0] processing_decimation = command_payload[1 * 8 +: 32];
     wire [31:0] processing_points     = command_payload[5 * 8 +: 32];
     wire [31:0] processing_refresh    = command_payload[9 * 8 +: 32];
@@ -200,6 +207,7 @@ module reg_file #(
     assign command_ready = (state == ST_IDLE) && !response_valid;
 
     assign adc_config_data = {
+        interleave_active,
         channel_mask_active,
         envelope_enable_active,
         refresh_millihz_active,
@@ -270,6 +278,8 @@ module reg_file #(
             gain_q15_ch2         <= 16'h8000;
             offset_code_ch2      <= 16'sd0;
 
+            interleave_shadow <= 1'b0;
+            interleave_active <= 1'b0;
             trigger_source_shadow      <= 1'b0;
             trigger_threshold_shadow   <= 12'h800;
             trigger_hysteresis_shadow  <= 12'd16;
@@ -407,7 +417,8 @@ module reg_file #(
                                 end
 
                                 CMD_SET_ACQUISITION: begin
-                                    if ((command_len != 8'd14) ||
+                                    if (((command_len != 8'd14) && (command_len != 8'd15)) ||
+                                        acquisition_mode_invalid ||
                                         (payload_0 > 8'd1) ||
                                         (acquisition_threshold[15:12] != 4'd0) ||
                                         (acquisition_hysteresis[15:12] != 4'd0) ||
@@ -422,10 +433,12 @@ module reg_file #(
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
                                     end else if (payload_12[0] &&
-                                                 (adc_config_busy || adc_armed_status)) begin
+                                                 (adc_config_busy || adc_armed_status ||
+                                                  ((acquisition_interleave != interleave_active) && mode_change_busy))) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin
+                                        interleave_shadow <= acquisition_interleave;
                                         trigger_source_shadow      <= payload_0[0];
                                         trigger_threshold_shadow   <= acquisition_threshold[11:0];
                                         trigger_hysteresis_shadow  <= acquisition_hysteresis[11:0];
@@ -435,6 +448,7 @@ module reg_file #(
                                         channel_mask_shadow        <= acquisition_channel_mask[1:0];
 
                                         if (payload_12[0]) begin
+                                            interleave_active <= acquisition_interleave;
                                             trigger_source_active      <= payload_0[0];
                                             trigger_threshold_active   <= acquisition_threshold[11:0];
                                             trigger_hysteresis_active  <= acquisition_hysteresis[11:0];
@@ -466,7 +480,8 @@ module reg_file #(
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
                                     end else if (payload_13[0] &&
-                                                 (adc_config_busy || adc_armed_status)) begin
+                                                 (adc_config_busy || adc_armed_status ||
+                                                  ((interleave_shadow != interleave_active) && mode_change_busy))) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin
@@ -476,6 +491,7 @@ module reg_file #(
                                         refresh_millihz_shadow <= processing_refresh;
 
                                         if (payload_13[0]) begin
+                                            interleave_active <= interleave_shadow;
                                             trigger_source_active      <= trigger_source_shadow;
                                             trigger_threshold_active   <= trigger_threshold_shadow;
                                             trigger_hysteresis_active  <= trigger_hysteresis_shadow;
@@ -501,7 +517,7 @@ module reg_file #(
                                     if (command_len != 8'd0) begin
                                         queue_empty_response(command_cmd, STATUS_INVALID_PARAM);
                                         record_command_error(STATUS_INVALID_PARAM);
-                                    end else if (adc_config_busy || adc_armed_status) begin
+                                    end else if (adc_config_busy || adc_armed_status || !adc_sample_ready || !adc_processing_ready) begin
                                         queue_empty_response(command_cmd, STATUS_BUSY);
                                         record_command_error(STATUS_BUSY);
                                     end else begin
@@ -549,13 +565,13 @@ module reg_file #(
                                         response_len     <= 8'd32;
                                         response_payload <= {(MAX_PAYLOAD_BYTES * 8){1'b0}};
                                         response_payload[0  * 8 +: 8]  <= 8'd1;
-                                        response_payload[1  * 8 +: 8]  <= 8'd0;
+                                        response_payload[1  * 8 +: 8]  <= 8'd1;
                                         response_payload[2  * 8 +: 8]  <= 8'd0;
-                                        response_payload[3  * 8 +: 8]  <= 8'd3;
+                                        response_payload[3  * 8 +: 8]  <= 8'd4;
                                         response_payload[4  * 8 +: 8]  <= 8'd0;
                                         response_payload[5  * 8 +: 8]  <= status_flags;
                                         response_payload[6  * 8 +: 8]  <= last_error;
-                                        response_payload[7  * 8 +: 8]  <= 8'd0;
+                                        response_payload[7  * 8 +: 8]  <= {5'd0, adc_stream_overflow, adc_sample_ready && adc_processing_ready, adc_mode_status};
                                         response_payload[8  * 8 +: 32] <= crc_error_count;
                                         response_payload[12 * 8 +: 32] <= uart_frame_error_count;
                                         response_payload[16 * 8 +: 32] <= command_error_count;

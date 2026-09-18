@@ -5,7 +5,7 @@ FPGA_IP = "192.168.1.10"
 UDP_PORT = 5001
 UART_BAUD = 921_600
 
-# 当前双通道 AD9226 为 65Msps；后续单通道交织为 130Msps。
+# 双通道 AD9226 为 65MSps；单通道交织为 130MSps。
 # 千兆网不能持续上传满速 RAW，短时基按 1:1 触发窗口上传，长时基用 Min/Max。
 ADC_SAMPLE_RATE_HZ = 65_000_000
 INTERLEAVE_SAMPLE_RATE_HZ = 130_000_000

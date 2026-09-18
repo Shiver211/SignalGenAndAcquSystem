@@ -25,7 +25,7 @@ module tb_control_plane_m3;
     wire [15:0] dc_code_ch2;
     wire [15:0] gain_q15_ch2;
     wire signed [15:0] offset_code_ch2;
-    wire [168:0] adc_config_active;
+    wire [169:0] adc_config_active;
     wire [15:0] adc_config_apply_count;
     wire [15:0] adc_clear_count;
     wire adc_control_armed;
@@ -44,7 +44,7 @@ module tb_control_plane_m3;
     reg [7:0] observed_len;
     reg [7:0] observed_crc;
     reg [7:0] observed_byte;
-    reg [168:0] expected_adc_config;
+    reg [169:0] expected_adc_config;
     integer failures;
     integer index;
     integer wait_cycles;
@@ -63,6 +63,8 @@ module tb_control_plane_m3;
         .BAUD_RATE         (BAUD_RATE),
         .MAX_PAYLOAD_BYTES (32)
     ) u_dut (
+        .adc_sample_ready(1'b1), .adc_processing_ready(1'b1),
+        .adc_capture_busy(1'b0), .adc_stream_overflow(1'b0), .clear_pulse_adc(),
         .clk_sys                    (clk_sys),
         .reset_sys                  (reset_sys),
         .clk_adc                    (clk_adc),
@@ -559,7 +561,7 @@ module tb_control_plane_m3;
         expect_response(8'h07, 8'h00);
         if ((observed_len !== 8'd32) ||
             (observed_payload[0 * 8 +: 8] !== 8'd1) ||
-            (observed_payload[3 * 8 +: 8] !== 8'd3) ||
+            (observed_payload[3 * 8 +: 8] !== 8'd4) ||
             (observed_payload[5 * 8 +: 8] !== 8'h64) ||
             (observed_payload[6 * 8 +: 8] !== 8'h05) ||
             (observed_payload[8 * 8 +: 32] !== 32'd1) ||

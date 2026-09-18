@@ -16,15 +16,18 @@ module edge_trigger_m5 (
 
     output wire        trigger_now,
     output reg         qualified,
-    output wire [11:0] lower_level,
-    output wire [11:0] upper_level
+    output reg [11:0] lower_level,
+    output reg [11:0] upper_level
 );
 
     wire [12:0] upper_sum = {1'b0, threshold} + {1'b0, hysteresis};
 
-    assign upper_level = upper_sum[12] ? 12'hFFF : upper_sum[11:0];
-    assign lower_level = (threshold >= hysteresis)
-        ? (threshold - hysteresis) : 12'h000;
+    // 配置期间预计算迟滞阈值，样本触发路径仅保留比较。
+    always @(posedge clk) begin
+        upper_level <= upper_sum[12] ? 12'hFFF : upper_sum[11:0];
+        lower_level <= (threshold >= hysteresis)
+            ? (threshold - hysteresis) : 12'h000;
+    end
 
     assign trigger_now = sample_valid && trigger_enable && qualified &&
         (falling_edge ? (sample_code <= lower_level)
@@ -51,4 +54,3 @@ module edge_trigger_m5 (
     end
 
 endmodule
-

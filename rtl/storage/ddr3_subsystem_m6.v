@@ -2,12 +2,13 @@
 
 // DDR3 子系统：224MiB RAW 存储、网络读回、包络与基础测量。
 module ddr3_subsystem_m6 (
+    output wire processing_ready, capture_busy_adc, stream_overflow,
     input  wire        clk_sys_100m,
     input  wire        reset_sys,
     input  wire        sys_rst_n,
     input  wire        system_mmcm_locked,
-    input  wire        clk_adc_read_65m,
-    input  wire        reset_adc_read,
+    input  wire        clk_sample_130m,
+    input  wire        reset_sample,
 
     input  wire        adc_sample_valid,
     input  wire [11:0] adc_code_a,
@@ -15,7 +16,7 @@ module ddr3_subsystem_m6 (
     input  wire        adc_otr_a,
     input  wire        adc_otr_b,
     input  wire        adc_control_armed,
-    input  wire [168:0] adc_control_config,
+    input  wire [169:0] adc_control_config,
     input  wire [15:0] adc_config_apply_count,
     output wire        capture_done_adc,
 
@@ -92,10 +93,13 @@ module ddr3_subsystem_m6 (
     wire ui_clk_sync_rst;
     wire [11:0] device_temp;
 
+    assign stream_overflow = fifo_overflow;
     assign ddr_ui_clk   = ui_clk;
     assign ddr_ui_reset = ui_clk_sync_rst;
     assign ddr_ref_clk_200m = clk_ref_200m;
 
+    wire interleave_enable = adc_control_config[169];
+    wire [31:0] sample_rate_hz = interleave_enable ? 32'd130_000_000 : 32'd65_000_000;
     wire [1:0] channel_mask = adc_control_config[168:167];
     wire capture_ch_a = channel_mask[0];
     wire capture_ch_b = channel_mask[1];
@@ -120,8 +124,8 @@ module ddr3_subsystem_m6 (
 
     reg [15:0] previous_apply_count;
     reg processing_config_update;
-    always @(posedge clk_adc_read_65m) begin
-        if (reset_adc_read) begin
+    always @(posedge clk_sample_130m) begin
+        if (reset_sample) begin
             previous_apply_count   <= adc_config_apply_count;
             processing_config_update <= 1'b0;
         end else begin
@@ -132,8 +136,9 @@ module ddr3_subsystem_m6 (
     end
 
     signal_processing_m6 u_signal_processing_m6 (
-        .clk                       (clk_adc_read_65m),
-        .reset                     (reset_adc_read),
+        .interleave_enable(interleave_enable), .sample_rate_hz(sample_rate_hz),
+        .clk                       (clk_sample_130m),
+        .reset                     (reset_sample),
         .config_update             (processing_config_update),
         .capture_depth             (capture_depth),
         .display_points            (display_points),
@@ -153,7 +158,7 @@ module ddr3_subsystem_m6 (
         .bucket_size               (),
         .measurement_window_samples(),
         .frame_interval_samples    (),
-        .processing_ready          (),
+        .processing_ready          (processing_ready),
         .envelope_valid            (envelope_valid),
         .envelope_data             (envelope_data),
         .envelope_frame_done       (envelope_frame_done),
@@ -165,6 +170,8 @@ module ddr3_subsystem_m6 (
         .measurement_descriptor    (measurement_descriptor)
     );
 
+    wire interleave_ui;
+    reg raw_frame_interleave;
     wire [1:0] channel_mask_ui;
     reg  [1:0] raw_frame_channel_mask_ui;
 
@@ -173,17 +180,17 @@ module ddr3_subsystem_m6 (
     // 一起冻结，避免组合描述符跨时钟域或晚一拍更新。
     xpm_cdc_array_single #(
         .DEST_SYNC_FF(2), .INIT_SYNC_FF(1), .SIM_ASSERT_CHK(0),
-        .SRC_INPUT_REG(1), .WIDTH(2)
+        .SRC_INPUT_REG(1), .WIDTH(3)
     ) u_channel_mask_to_ui (
-        .src_clk(clk_adc_read_65m), .src_in(channel_mask),
-        .dest_clk(ui_clk), .dest_out(channel_mask_ui)
+        .src_clk(clk_sample_130m), .src_in({interleave_enable, channel_mask}),
+        .dest_clk(ui_clk), .dest_out({interleave_ui, channel_mask_ui})
     );
 
     always @(posedge ui_clk) begin
         if (ui_clk_sync_rst)
-            raw_frame_channel_mask_ui <= 2'b11;
+            {raw_frame_interleave, raw_frame_channel_mask_ui} <= 3'b011;
         else if (!frame_valid)
-            raw_frame_channel_mask_ui <= channel_mask_ui;
+            {raw_frame_interleave, raw_frame_channel_mask_ui} <= {interleave_ui, channel_mask_ui};
     end
 
     // 网络独占 RAW 读口，不再为未上传的统计值额外扫描整帧。
@@ -191,7 +198,7 @@ module ddr3_subsystem_m6 (
         .RING_SAMPLES(RAW_RING_SAMPLES),
         .RING_BASE_APP_ADDR(28'd0)
     ) u_raw_storage_core (
-        .clk_adc(clk_adc_read_65m), .reset_adc(reset_adc_read),
+        .clk_adc(clk_sample_130m), .reset_adc(reset_sample),
         .ui_clk(ui_clk), .ui_reset(ui_clk_sync_rst),
         .init_calib_complete(ddr_calibrated),
         .control_armed(adc_control_armed),
@@ -215,7 +222,7 @@ module ddr3_subsystem_m6 (
         .app_wdf_end(app_wdf_end), .app_wdf_mask(app_wdf_mask),
         .app_wdf_wren(app_wdf_wren), .app_wdf_rdy(app_wdf_rdy),
         .app_rd_data(app_rd_data), .app_rd_data_valid(app_rd_data_valid),
-        .capture_done_adc(capture_done_adc), .capture_active_adc(),
+        .capture_done_adc(capture_done_adc), .capture_active_adc(capture_busy_adc),
         .triggered_adc(), .capture_aborted_adc(), .fifo_overflow(fifo_overflow),
         .adc_accepted_samples(), .adc_pretrigger_samples(), .adc_state_debug(),
         .fifo_wr_count(), .fifo_rd_count(), .frame_valid(frame_valid),
@@ -253,10 +260,10 @@ module ddr3_subsystem_m6 (
 
     frame_descriptor_m6 u_raw_descriptor (
         .data_type(8'h01), .frame_id(frame_id), .total_samples(frame_total_samples),
-        .sample_rate_hz(32'd65_000_000), .trigger_index(frame_trigger_index),
+        .sample_rate_hz(raw_frame_interleave ? 32'd130_000_000 : 32'd65_000_000), .trigger_index(frame_trigger_index),
         .channel_mask({6'd0, raw_frame_channel_mask_ui}),
         .sample_format((raw_frame_channel_mask_ui == 2'b11) ? 8'h01 : 8'h05),
-        .flags({15'd0, frame_wrapped}),
+        .flags({7'd0, raw_frame_interleave, 7'd0, frame_wrapped}),
         .decimation(32'd1), .descriptor(raw_descriptor)
     );
 

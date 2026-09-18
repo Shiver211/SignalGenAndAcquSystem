@@ -179,13 +179,15 @@ module network_data_scheduler_m7 (
                                    (env_point_index_latched *
                                     env_bytes_per_point32) :
                                                            32'd0;
-    assign app_flags = ((state == S_RAW_PREPARE) ||
+    // bit0/1 为分包首尾标志；bit8 从冻结的帧描述符保留采样模式。
+    wire [15:0] chunk_flags = ((state == S_RAW_PREPARE) ||
                         (state == S_RAW_PAYLOAD)) ?
                            {14'd0, raw_last_chunk, (raw_offset_current == 32'd0)} :
                        ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||
                         (state == S_ENV_PAYLOAD)) ?
                            {14'd0, env_last_chunk,
                             (env_point_index_latched == 32'd0)} : 16'h0003;
+    assign app_flags = chunk_flags | (app_descriptor[175:160] & 16'h0100);
     assign app_payload_length = ((state == S_RAW_PREPARE) ||
                                  (state == S_RAW_PAYLOAD)) ? raw_chunk_length :
                                 ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||

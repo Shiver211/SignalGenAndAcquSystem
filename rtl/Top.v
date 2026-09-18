@@ -41,6 +41,9 @@ module Top (
     inout  wire eth_mdio
 );
 
+    wire clk_sample_130m, rst_sample, phase_ready;
+    wire interleave_clock, adc_sample_ready, adc_front_overflow;
+    wire adc_processing_ready, adc_capture_busy, adc_storage_overflow, clear_pulse_adc;
     wire clk_sys_100m;
     wire clk_adc_65m;
     wire clk_adc_read_65m;
@@ -75,7 +78,7 @@ module Top (
     wire [31:0] dac_update_rate_ch1_hz;
     wire [31:0] dac_update_rate_ch2_hz;
 
-    wire [168:0] adc_control_config;
+    wire [169:0] adc_control_config;
     wire [15:0] adc_control_apply_count;
     wire adc_control_armed_adc;
     wire capture_done_adc;
@@ -115,6 +118,7 @@ module Top (
     wire [31:0] raw_upload_length;
 
     clock_reset_m0 u_clock_reset_m0 (
+        .clk_sample_130m(clk_sample_130m), .rst_sample(rst_sample), .phase_ready(phase_ready),
         .sys_clk          (sys_clk),
         .sys_rst_n        (sys_rst_n),
         .phase_request_toggle(1'b0),
@@ -134,6 +138,7 @@ module Top (
     );
 
     ad9226_clock_forward u_ad9226_clock_forward (
+        .interleave_enable(adc_control_config[169]), .interleave_active(interleave_clock),
         .clk_adc_65m (clk_adc_65m),
         .reset       (rst_adc),
         .adc_clk_a   (adc_clk_a),
@@ -141,18 +146,20 @@ module Top (
     );
 
     ddr3_subsystem_m6 u_ddr3_subsystem_m6 (
+        .processing_ready(adc_processing_ready), .capture_busy_adc(adc_capture_busy),
+        .stream_overflow(adc_storage_overflow),
         .clk_sys_100m       (clk_sys_100m),
         .reset_sys          (rst_sys),
         .sys_rst_n          (sys_rst_n),
         .system_mmcm_locked (mmcm_locked),
-        .clk_adc_read_65m   (clk_adc_read_65m),
-        .reset_adc_read     (rst_adc_read),
-        .adc_sample_valid   (adc_sample_valid),
+        .clk_sample_130m   (clk_sample_130m),
+        .reset_sample     (rst_sample),
+        .adc_sample_valid   (adc_sample_valid && adc_sample_ready),
         .adc_code_a         (adc_code_a_captured),
         .adc_code_b         (adc_code_b_captured),
         .adc_otr_a          (adc_otr_a_captured),
         .adc_otr_b          (adc_otr_b_captured),
-        .adc_control_armed  (adc_control_armed_adc),
+        .adc_control_armed  (adc_control_armed_adc && !adc_front_overflow),
         .adc_control_config (adc_control_config),
         .adc_config_apply_count(adc_control_apply_count),
         .capture_done_adc   (capture_done_adc),
@@ -228,7 +235,7 @@ module Top (
     ) u_network_subsystem_m7 (
         .clk_input_100m(clk_sys_100m), .sys_rst_n(sys_rst_n),
         .clk_sys_100m(clk_sys_100m), .reset_sys(rst_sys),
-        .clk_adc_65m(clk_adc_read_65m), .reset_adc(rst_adc_read),
+        .clk_adc_65m(clk_sample_130m), .reset_adc(rst_sample),
         .config_apply_count_adc(adc_control_apply_count),
         .clk_ref_200m(ddr_ref_clk_200m),
         .ui_clk(ddr_ui_clk), .ui_reset(ddr_ui_reset),
@@ -262,6 +269,10 @@ module Top (
     );
 
     ad9226_capture u_ad9226_capture (
+        .clk_sample_130m(clk_sample_130m), .reset_sample(rst_sample),
+        .phase_ready(phase_ready), .interleave_enable(adc_control_config[169]),
+        .interleave_clock(interleave_clock), .clear_errors(clear_pulse_adc),
+        .sample_ready(adc_sample_ready), .overflow(adc_front_overflow),
         .clk_adc_read_65m (clk_adc_read_65m),
         .reset             (rst_adc_read),
         .adc_data_a        (adc_data_a),
@@ -284,10 +295,13 @@ module Top (
         .CLK_FREQ_HZ (100_000_000),
         .BAUD_RATE   (921_600)
     ) u_control_plane (
+        .adc_sample_ready(adc_sample_ready), .adc_processing_ready(adc_processing_ready),
+        .adc_stream_overflow(adc_front_overflow || adc_storage_overflow),
+        .adc_capture_busy(adc_capture_busy), .clear_pulse_adc(clear_pulse_adc),
         .clk_sys                    (clk_sys_100m),
         .reset_sys                  (rst_sys),
-        .clk_adc                    (clk_adc_read_65m),
-        .reset_adc                  (rst_adc_read),
+        .clk_adc                    (clk_sample_130m),
+        .reset_adc                  (rst_sample),
         .uart_rxd                   (uart_rxd),
         .uart_txd                   (uart_txd),
         .ddr_calibrated             (ddr_calibrated_sync),

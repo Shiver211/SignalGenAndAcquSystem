@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from enum import IntEnum
+from dataclasses import replace
 from pathlib import Path
 from math import ceil
+from time import monotonic
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from serial.tools import list_ports
@@ -16,7 +18,7 @@ from host.comm.control_protocol import (
 )
 from host.comm.data_protocol import (
     CompletedFrame, Measurement, SampleFormat, decode_measurement_v1,
-    decode_raw32,
+    decode_envelope64, decode_raw32,
 )
 from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
@@ -25,8 +27,8 @@ from host.config import (
     PC_IP, UART_BAUD, UDP_PORT,
 )
 from host.core.waveform import (
-    code_to_voltage, codes_to_voltage, format_frequency_hz, format_voltage,
-    gain_from_known_vpp, measure_waveform, vpp_from_code_span,
+    clean_square_waveform, code_to_voltage, format_frequency_hz, format_voltage,
+    gain_from_known_vpp, vpp_from_code_span, zero_crossing_frequency,
 )
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
@@ -69,6 +71,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_raw_frame_id = 0
         self._last_measurement: Measurement | None = None
         self._last_measurement_mask = 0
+        self._hardware_measurement: Measurement | None = None
+        self._hardware_measurement_mask = 0
+        self._square_amplitude: dict[str, int] = {}
+        self._square_amplitude_mask = 0
+        self._square_amplitude_time = 0.0
         self._adc_gain = {1: 1.0, 2: 1.0}
         self._adc_offset = {1: 0.0, 2: 0.0}
         self._uart_connected = False
@@ -278,14 +285,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.note_edit = QtWidgets.QLineEdit(); self.note_edit.setPlaceholderText("记录备注")
         toolbar.addWidget(QtWidgets.QLabel("波形显示（10 × 8 div）"))
         toolbar.addStretch(1)
-        self.edge_overshoot_checkbox = QtWidgets.QCheckBox("抑制边沿过冲")
-        self.edge_overshoot_checkbox.setChecked(True)
-        self.edge_overshoot_checkbox.setToolTip(
-            "减弱重复方波边沿后的同形过冲，保留独立毛刺。\n"
-            "仅调整显示，测量和保存使用原始数据；取消勾选可对照原始波形。\n"
-            "支持压缩包络；平台不可分辨或样本不足时保留原样。"
-        )
-        toolbar.addWidget(self.edge_overshoot_checkbox)
         # FFT、记录/回放属于后续高级功能，保留对象和槽函数但不放入主布局。
         self.analysis_combo.setVisible(False)
         self.note_edit.setVisible(False)
@@ -367,9 +366,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ch1_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(1, value))
         self.ch2_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(2, value))
         self.analysis_combo.currentIndexChanged.connect(self._set_analysis)
-        self.edge_overshoot_checkbox.toggled.connect(
-            self.plot_widget.set_edge_overshoot_suppression,
-        )
         self.save_button.clicked.connect(self._save_current)
         self.refresh_records_button.clicked.connect(self._refresh_records)
         self.replay_button.clicked.connect(self._replay_selected)
@@ -447,6 +443,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return max(1, min(RAW_MAX_SAMPLES, int(round(ADC_SAMPLE_RATE_HZ * duration_s))))
 
     def _apply_acquisition(self) -> None:
+        self._clear_continuous_measurement()
         was_continuous = self._continuous_running
         if self._uart_connected:
             self.serial_link.send_command(Command.STOP)
@@ -506,6 +503,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode == AcquisitionMode.CONTINUOUS and self._uart_connected:
             self.serial_link.send_command(Command.STOP)
         self._acquisition_mode = mode
+        self._clear_continuous_measurement()
         self._update_acquisition_mode_widgets()
 
     def _update_acquisition_mode_widgets(self) -> None:
@@ -590,6 +588,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_uart_connection(self, connected: bool, detail: str) -> None:
         self._uart_connected = connected
+        self._clear_continuous_measurement()
         if connected:
             self.settings.setValue("connection/serial_port", detail)
             # FPGA 可能还保留上一次会话的显示点数（例如 100 点）。
@@ -634,12 +633,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._accept_manual_raw(frame)
             return
         if frame.header.sample_format == SampleFormat.MEASUREMENT_V1:
-            measurement = decode_measurement_v1(frame.payload)
+            self._hardware_measurement = decode_measurement_v1(frame.payload)
+            self._hardware_measurement_mask = frame.header.channel_mask
+            self._refresh_continuous_measurement()
             if persist_measurement:
-                self.store.save_measurement(frame.header.frame_id, measurement)
-            self._last_measurement = measurement
-            self._last_measurement_mask = frame.header.channel_mask
-            self._render_measurement(measurement, frame.header.channel_mask)
+                self.store.save_measurement(frame.header.frame_id, self._last_measurement)
         else:
             # 时基切换期间残留的旧包络帧不能覆盖即时过渡显示；只有
             # 帧头时长匹配当前窗口的新帧才更新当前波形。
@@ -650,6 +648,53 @@ class MainWindow(QtWidgets.QMainWindow):
             # 测量包只更新读数，不能覆盖用户准备保存/回放的波形帧。
             self.current_frame = frame
             self.plot_widget.display_frame(frame)
+            if is_raw:
+                self._clear_continuous_measurement()
+                self._measure_raw_frame(frame)
+            else:
+                self._update_square_amplitude(frame)
+
+    def _clear_continuous_measurement(self) -> None:
+        self._hardware_measurement = None
+        self._hardware_measurement_mask = 0
+        self._square_amplitude = {}
+        self._square_amplitude_mask = 0
+        self._square_amplitude_time = 0.0
+
+    def _update_square_amplitude(self, frame: CompletedFrame) -> None:
+        # 每帧重建，非方波和无法分辨平台的包络不能沿用上一帧的修正。
+        self._square_amplitude = {}
+        self._square_amplitude_mask = frame.header.channel_mask
+        self._square_amplitude_time = monotonic()
+        if frame.header.sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
+            decoded = decode_envelope64(frame.payload, frame.header.channel_mask)
+            for channel, name in ((1, "a"), (2, "b")):
+                if not frame.header.channel_mask & channel:
+                    continue
+                cleaned = clean_square_waveform(decoded[f"min_{name}"], decoded[f"max_{name}"])
+                if cleaned is None:
+                    continue
+                minimum, maximum = int(round(cleaned.min())), int(round(cleaned.max()))
+                self._square_amplitude.update({
+                    f"min_{name}": minimum, f"max_{name}": maximum,
+                    f"vpp_{name}": maximum - minimum,
+                    f"mean_{name}": int(round(cleaned.mean())),
+                })
+        self._refresh_continuous_measurement()
+
+    def _refresh_continuous_measurement(self) -> None:
+        if self._hardware_measurement is None:
+            return
+        measurement = self._hardware_measurement
+        mask = self._hardware_measurement_mask
+        # 两类报文独立编号，幅度取最近有效波形，频率/OTR 取硬件包。
+        # 超过三个刷新周期（至少 0.5 秒）无新波形时，不继续套用旧幅度。
+        fresh = monotonic() - self._square_amplitude_time <= max(0.5, 3.0 / max(1.0, self.refresh_spin.value()))
+        if mask == self._square_amplitude_mask and fresh:
+            measurement = replace(measurement, **self._square_amplitude)
+        self._last_measurement = measurement
+        self._last_measurement_mask = mask
+        self._render_measurement(measurement, mask)
 
     def _accept_manual_raw(self, frame: CompletedFrame) -> None:
         self.current_frame = frame
@@ -683,23 +728,22 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_rate = float(frame.header.sample_rate_hz)
         mask = frame.header.channel_mask
 
-        def stats(codes, channel: int) -> tuple[int, int, int, int, bool]:
+        def stats(codes) -> tuple[int, int, int, int, int, bool]:
             if codes.size == 0:
-                return 0, 0, 0, 0, False
-            minimum = int(codes.min())
-            maximum = int(codes.max())
-            volts = codes_to_voltage(
-                codes, gain=self._adc_gain[channel], offset_v=self._adc_offset[channel],
-            )
-            measured = measure_waveform(volts, sample_rate)
-            return minimum, maximum, maximum - minimum, int(round(measured.frequency_hz)), measured.frequency_hz > 0
+                return 0, 0, 0, 0, 0, False
+            cleaned = clean_square_waveform(codes)
+            amplitude = codes if cleaned is None else cleaned
+            minimum = int(round(amplitude.min()))
+            maximum = int(round(amplitude.max()))
+            frequency = zero_crossing_frequency(codes, sample_rate)
+            return (minimum, maximum, maximum - minimum, int(round(amplitude.mean())),
+                    int(round(frequency)), frequency > 0)
 
-        min_a, max_a, vpp_a, freq_a, valid_a = stats(decoded["a"], 1)
-        min_b, max_b, vpp_b, freq_b, valid_b = stats(decoded["b"], 2)
+        min_a, max_a, vpp_a, mean_a, freq_a, valid_a = stats(decoded["a"])
+        min_b, max_b, vpp_b, mean_b, freq_b, valid_b = stats(decoded["b"])
         measurement = Measurement(
             min_a=min_a, max_a=max_a, min_b=min_b, max_b=max_b,
-            mean_a=int(decoded["a"].mean()) if decoded["a"].size else 0,
-            mean_b=int(decoded["b"].mean()) if decoded["b"].size else 0,
+            mean_a=mean_a, mean_b=mean_b,
             vpp_a=vpp_a, vpp_b=vpp_b,
             otr_count_a=int(decoded["otr_a"].sum()),
             otr_count_b=int(decoded["otr_b"].sum()),
@@ -851,6 +895,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_widget.display_frame(self.current_frame)
         if self._acquisition_mode == AcquisitionMode.MANUAL:
             return
+        self._clear_continuous_measurement()
         # 先清掉 socket 中的旧配置报文，再提交 FPGA 新参数；旧帧
         # 仍可由下面的即时重绘作为过渡，但不会排队数秒后才看到新帧。
         self.udp_receiver.discard_pending()
@@ -865,6 +910,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_channel_controls()
         if self._manual_busy or self._acquisition_mode == AcquisitionMode.MANUAL:
             return
+        self._clear_continuous_measurement()
         # 通道开关属于采集配置：已连接时立即让 FPGA 停止采集/传输未选通道。
         if self._uart_connected:
             self._apply_acquisition()

@@ -129,140 +129,94 @@ def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
     ) / 16.0
 
 
-def _repeated_edge_matches(excess: np.ndarray, tolerance: float) -> np.ndarray:
-    """允许多种采样相位的重复形态，独立异常峰没有匹配对象便保留。"""
-    # 峰的位置会随亚采样相位和抽桶边界改变，比较幅度分布而非固定列。
-    profiles = np.sort(excess, axis=1)
-    peaks = profiles[:, -1]
-    matches = np.zeros(len(profiles), dtype=bool)
-    # 每个边沿只与邻近八次同向边沿比较，避免长帧进行全量两两比较。
-    for distance in range(1, min(len(profiles), 9)):
-        smaller_peak = np.minimum(peaks[:-distance], peaks[distance:])
-        allowed = np.maximum(tolerance * 2.0, smaller_peak * 0.5)
-        repeated = ((smaller_peak > tolerance)
-                    & (np.max(np.abs(profiles[:-distance] - profiles[distance:]), axis=1)
-                       <= allowed))
-        matches[:-distance] |= repeated
-        matches[distance:] |= repeated
-    # 整体仍需至少三次且多数边沿得到重复验证，不能用两个偶发峰启动修整。
-    if np.count_nonzero(matches) < max(3, int(np.ceil(len(profiles) * 0.6))):
-        matches[:] = False
-    return matches
+def _prepare_square_waveform(
+    minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """显示与幅度测量共用的方波清理，不修改原始采样。
 
-
-def suppress_repeated_edge_overshoot(samples: np.ndarray) -> np.ndarray:
-    """仅修整重复方波边沿后的同形过冲，供等间隔原始采样的显示使用。
-
-    用双平台和持续电平跳变识别方波，再比较同方向边沿后的六个样本。
-    至少三次且多数边沿有相近过冲才处理；独立尖峰、短脉冲和异常边沿
-    保留。与重复过冲同相同形的毛刺无法区分，可关闭显示修整查看原始值。
-    """
-    values = np.asarray(samples, dtype=np.float64)
-    result = values.copy()
-    if values.size < 32:
-        return result
-
-    lower, upper = np.quantile(values, [0.1, 0.9])
-    if upper <= lower:
-        return result
-    high_state = values > (lower + upper) / 2.0
-    low = float(np.median(values[~high_state]))
-    high = float(np.median(values[high_state]))
-    span = high - low
-    # 正弦/三角波没有占据大多数样本的两个稳定平台，不参与修整。
-    residual = np.abs(values - np.where(high_state, high, low))
-    if np.mean(residual <= span * 0.08) < 0.8:
-        return result
-    tolerance = max(span * 0.005, float(np.median(residual)) * 4.0)
-
-    edges = np.flatnonzero(high_state[1:] != high_state[:-1]) + 1
-    runs = np.diff(np.r_[0, edges, values.size])
-    # 跳变两侧至少各持续十二点，避免把窄脉冲的边沿当作方波主边沿。
-    edges = edges[(runs[:-1] >= 12) & (runs[1:] >= 12)]
-    offsets = np.arange(6)
-    for rising, level, previous in ((True, high, low), (False, low, high)):
-        starts = edges[high_state[edges] == rising]
-        if starts.size < 3:
-            continue
-        before = values[starts[:, None] + np.arange(-6, -3)]
-        settled = values[starts[:, None] + np.arange(6, 10)]
-        stable = ((np.max(np.abs(before - previous), axis=1) <= span * 0.08)
-                  & (np.max(np.abs(settled - level), axis=1) <= span * 0.08))
-        starts = starts[stable]
-        if starts.size < 3:
-            continue
-
-        indices = starts[:, None] + offsets
-        direction = 1.0 if rising else -1.0
-        excess = np.maximum(direction * (values[indices] - level), 0.0)
-        matches = _repeated_edge_matches(excess, tolerance)
-        correction = matches[:, None] & (excess > tolerance)
-        result[indices[correction]] = level
-    return result
-
-
-def suppress_envelope_edge_overshoot(
-    minimum: np.ndarray, maximum: np.ndarray, samples_per_bucket: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """修整压缩包络的重复过冲，同时保留桶内独立毛刺的极值。
-
-    桶内采样顺序已经丢失，因此从窄包络的平台估计高低电平，比较多次
-    同向边沿附近的极值。比较排序后的过冲幅度，允许过冲落在相邻桶；
-    平台不可分辨或边沿附近存在异常峰时保留原样。
+    高低平台须能独立辨认。按平台偏差中位数保留小抖动，异常值回到平台；
+    短于典型平台 15% 的内部反向脉冲视作毛刺。完整跳变只在
+    50% 电平交点插入一对同 X 坐标的端点，不把过渡样本画成多级台阶。
+    压缩包络只能估计交点；平台不可分辨时返回 None，继续显示原包络。
     """
     lo = np.asarray(minimum, dtype=np.float64)
-    hi = np.asarray(maximum, dtype=np.float64)
-    if samples_per_bucket == 1:
-        if np.array_equal(lo, hi):
-            corrected = suppress_repeated_edge_overshoot(lo)
-            return corrected, corrected.copy()
-        return lo.copy(), hi.copy()
-    result_lo, result_hi = lo.copy(), hi.copy()
-    if lo.size < 16:
-        return result_lo, result_hi
-
+    hi = lo if maximum is None else np.asarray(maximum, dtype=np.float64)
+    if len(lo) < 16:
+        return None
     center = (lo + hi) / 2.0
     lower, upper = np.quantile(center, [0.1, 0.9])
     if upper <= lower:
-        return result_lo, result_hi
-    high_state = center > (lower + upper) / 2.0
-    # 跨越跳变的宽包络不能用来估计平台，否则过冲会抬高目标电平。
-    narrow = hi - lo <= (upper - lower) * 0.08
-    low_plateau, high_plateau = narrow & ~high_state, narrow & high_state
-    if (np.count_nonzero(narrow) < lo.size * 0.25
-            or min(np.count_nonzero(low_plateau), np.count_nonzero(high_plateau)) < 3):
-        return result_lo, result_hi
-    low = float(np.median(center[low_plateau]))
-    high = float(np.median(center[high_plateau]))
+        return None
+    state = center > (lower + upper) / 2.0
+    narrow = hi - lo <= (upper - lower) * 0.1
+    low_samples, high_samples = narrow & ~state, narrow & state
+    if (np.count_nonzero(narrow) < len(lo) * 0.25
+            or min(np.count_nonzero(low_samples), np.count_nonzero(high_samples)) < 3):
+        return None
+    low = float(np.median(center[low_samples]))
+    high = float(np.median(center[high_samples]))
     span = high - low
-    residual = np.abs(center - np.where(high_state, high, low))
+    residual = np.abs(center - np.where(state, high, low))
+    # 平台占主要部分才认为是方波，避免把正弦、三角和缓慢斜坡整形成方波。
     if np.mean(residual[narrow] <= span * 0.08) < 0.8:
-        return result_lo, result_hi
-    tolerance = max(span * 0.005, float(np.median(residual[narrow])) * 4.0)
+        return None
 
-    edges = np.flatnonzero(high_state[1:] != high_state[:-1]) + 1
-    runs = np.diff(np.r_[0, edges, lo.size])
-    minimum_run = max(2, int(np.ceil(12 / samples_per_bucket)))
-    edges = edges[(runs[:-1] >= minimum_run) & (runs[1:] >= minimum_run)]
-    # 中心线跨阈值的桶可能比真实跳变晚一桶，前一桶也需参与比较。
-    window = int(np.ceil(6 / samples_per_bucket)) + 1
-    edges = edges[(edges >= 1) & (edges + window <= lo.size)]
-    for rising, level in ((True, high), (False, low)):
-        starts = edges[high_state[edges] == rising]
-        if starts.size < 3:
-            continue
-        indices = starts[:, None] + np.arange(-1, window)
-        excess = np.maximum(hi[indices] - level if rising else level - lo[indices], 0.0)
-        matches = _repeated_edge_matches(excess, tolerance)
-        corrected = indices[matches[:, None] & (excess > tolerance)]
-        # 同时修整上下边界，中心线稍后由修整后的包络重新计算。
-        if rising:
-            result_lo[corrected] = np.minimum(result_lo[corrected], level)
-            result_hi[corrected] = np.minimum(result_hi[corrected], level)
-        else:
-            result_lo[corrected] = np.maximum(result_lo[corrected], level)
-            result_hi[corrected] = np.maximum(result_hi[corrected], level)
-    return result_lo, result_hi
+    boundaries = np.r_[0, np.flatnonzero(state[1:] != state[:-1]) + 1, len(lo)]
+    lengths = np.diff(boundaries)
+    if len(lengths) < 3:
+        return None
+    minimum_run = max(2, int(np.quantile(lengths, 0.75) * 0.15))
+    keep = lengths >= minimum_run
+    if np.count_nonzero(keep) < 3:
+        return None
+    # 保留首尾的部分周期；内部短反向脉冲沿用之前的稳定平台。
+    keep[0] = keep[-1] = True
+    preceding = np.maximum.accumulate(np.where(keep, np.arange(len(lengths)), 0))
+    state = np.repeat(state[boundaries[:-1]][preceding], lengths)
+    edges = np.flatnonzero(state[1:] != state[:-1]) + 1
+    if len(edges) < 2:
+        return None
+
+    level = np.where(state, high, low)
+    # 不对平台做平滑。阈值随平台噪声自适应，在电平差 0.3%~2% 内，
+    # 避免平台很安静时还保留明显高于噪声的残余尖峰。
+    tolerance = np.clip(4.5 * np.median(residual[narrow]), span * 0.003, span * 0.02)
+    clean = np.where(np.abs(center - level) <= tolerance, center, level)
+    threshold = (low + high) / 2.0
+    delta = center[edges] - center[edges - 1]
+    fraction = np.clip(np.divide(threshold - center[edges - 1], delta,
+                                out=np.full(len(edges), 0.5), where=delta != 0), 0, 1)
+    return clean, edges, fraction
+
+
+def clean_square_waveform(
+    minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """返回去过冲、大毛刺且保留小抖动的等间隔样本；非方波返回 None。"""
+    prepared = _prepare_square_waveform(minimum, maximum)
+    return prepared[0] if prepared is not None else None
+
+
+def idealize_square_display(
+    time: np.ndarray, minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """在清理后的方波样本间插入竖直边沿；新增绘图端点不参与测量。"""
+    prepared = _prepare_square_waveform(minimum, maximum)
+    if prepared is None:
+        return None
+    clean, edges, fraction = prepared
+    x = np.asarray(time, dtype=np.float64)
+    crossing = x[edges - 1] + fraction * (x[edges] - x[edges - 1])
+
+    # 插入两点形成单根竖线，其余点仍用普通连线，平台噪声不会变成阶梯。
+    positions = np.arange(len(x)) + 2 * np.searchsorted(edges, np.arange(len(x)), side="right")
+    vertical = edges + 2 * np.arange(len(edges))
+    display_x = np.empty(len(x) + 2 * len(edges))
+    display_y = np.empty_like(display_x)
+    display_x[positions], display_y[positions] = x, clean
+    display_x[vertical] = display_x[vertical + 1] = crossing
+    display_y[vertical], display_y[vertical + 1] = clean[edges - 1], clean[edges]
+    return display_x, display_y
 
 
 def fft_spectrum(samples: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.ndarray]:
@@ -299,15 +253,18 @@ def zero_crossing_frequency(samples: np.ndarray, sample_rate_hz: float) -> float
 
 
 def measure_waveform(samples_v: np.ndarray, sample_rate_hz: float) -> WaveformMeasurements:
+    """方波幅度按清理后的样本计算，频率仍由原始采样估计。"""
     values = np.asarray(samples_v, dtype=np.float64)
     if values.size == 0:
         return WaveformMeasurements(0.0, 0.0, 0.0, 0.0, 0.0)
-    minimum = float(np.min(values))
-    maximum = float(np.max(values))
+    cleaned = clean_square_waveform(values)
+    amplitude = values if cleaned is None else cleaned
+    minimum = float(np.min(amplitude))
+    maximum = float(np.max(amplitude))
     return WaveformMeasurements(
         minimum_v=minimum,
         maximum_v=maximum,
-        mean_v=float(np.mean(values)),
+        mean_v=float(np.mean(amplitude)),
         vpp_v=maximum - minimum,
         frequency_hz=zero_crossing_frequency(values, sample_rate_hz),
     )

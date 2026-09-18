@@ -39,7 +39,7 @@ class UiSmokeTest(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
-    def test_edge_display_toggle_preserves_measurement_and_saved_frame(self) -> None:
+    def test_ideal_display_cleans_measurement_and_preserves_saved_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = create_window(Path(directory) / "edge.db")
             try:
@@ -52,12 +52,13 @@ class UiSmokeTest(unittest.TestCase):
                 window._on_frame(frame)
                 window._measure_raw_frame(frame)
                 measured = [label.text() for label in window.measurement_labels]
-                self.assertEqual(window._last_measurement.max_a, int(codes.max()))
+                self.assertLess(window._last_measurement.max_a, int(codes.max()))
+                self.assertGreater(window._last_measurement.min_a, int(codes.min()))
+                self.assertAlmostEqual(window._last_measurement.vpp_a / 4095 * 10, 2.0, delta=0.02)
                 corrected = window.plot_widget.curve_a.getData()[1].copy()
-                window.edge_overshoot_checkbox.setChecked(False)
-                self.assertGreater(window.plot_widget.curve_a.getData()[1][17], corrected[17])
-                window.edge_overshoot_checkbox.setChecked(True)
-                np.testing.assert_array_equal(window.plot_widget.curve_a.getData()[1], corrected)
+                self.assertLess(float(corrected.max()), 2.05)  # 500 mV/div 下平台为 2 格。
+                self.assertFalse(hasattr(window, "edge_overshoot_checkbox"))
+                self.assertFalse(hasattr(window, "waveform_display_combo"))
                 self.assertEqual([label.text() for label in window.measurement_labels], measured)
                 window._save_current()
                 record = window.store.list_captures()[0]

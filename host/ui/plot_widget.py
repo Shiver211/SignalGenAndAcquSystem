@@ -16,10 +16,8 @@ import pyqtgraph as pg
 from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
-from host.config import ADC_SAMPLE_RATE_HZ
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, suppress_envelope_edge_overshoot,
-    suppress_repeated_edge_overshoot,
+    codes_to_voltage, fft_spectrum, idealize_square_display,
 )
 
 
@@ -87,7 +85,6 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
 
         self._fft = False
-        self._edge_overshoot_suppression = True
         self._seconds_per_div = 0.001
         self._channel_mode = ChannelDisplayMode.BOTH
         self._visible_channels = {1, 2}
@@ -122,11 +119,6 @@ class PlotWidget(QtWidgets.QWidget):
         self._fft = bool(enabled)
         if self._last_frame is not None:
             self.display_frame(self._last_frame)
-
-    def set_edge_overshoot_suppression(self, enabled: bool) -> None:
-        """切换显示修整，并从保留的原始帧重绘。"""
-        self._edge_overshoot_suppression = bool(enabled)
-        self._redraw_last_frame()
 
     def set_channel_mode(self, mode: ChannelDisplayMode | int | str) -> None:
         """选择 ``BOTH``、``CH1`` 或 ``CH2`` 显示。"""
@@ -266,7 +258,8 @@ class PlotWidget(QtWidgets.QWidget):
 
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
-        包络帧保留每桶的 Min/Max 范围；原始帧在压缩时保留桶内极值。
+        可识别的方波自动整形；其他包络保留 Min/Max 范围。
+        原始帧在压缩时保留桶内极值。
         """
         self._last_frame = frame
         sample_format = frame.header.sample_format
@@ -309,18 +302,16 @@ class PlotWidget(QtWidgets.QWidget):
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
-        # 极值抽点后的样本不再等间隔，不能用于边沿形状比较。
-        if (self._edge_overshoot_suppression and len(indices) == len(a)
-                and sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)):
-            display_a = suppress_repeated_edge_overshoot(display_a)
-            display_b = suppress_repeated_edge_overshoot(display_b)
         x = (indices - (trigger_index if align_trigger else 0)) / sample_rate
         self._has_trigger_alignment = align_trigger
         self._set_time_range()
         self._clear_envelope()
         self._envelope_active = False
-        self.curve_a.setData(x, self._to_divisions(display_a, 1))
-        self.curve_b.setData(x, self._to_divisions(display_b, 2))
+        for channel, curve, values in ((1, self.curve_a, display_a), (2, self.curve_b, display_b)):
+            ideal = (idealize_square_display(x, values)
+                     if len(indices) == len(a) else None)
+            display_x, display_y = ideal if ideal is not None else (x, values)
+            curve.setData(display_x, self._to_divisions(display_y, channel))
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
@@ -343,29 +334,29 @@ class PlotWidget(QtWidgets.QWidget):
             min_a, max_a = min_a[:visible_count], max_a[:visible_count]
             min_b, max_b = min_b[:visible_count], max_b[:visible_count]
         sample_rate = float(frame.header.sample_rate_hz)
-        if self._edge_overshoot_suppression:
-            samples_per_bucket = max(1, round(ADC_SAMPLE_RATE_HZ / sample_rate))
-            min_a, max_a = suppress_envelope_edge_overshoot(min_a, max_a, samples_per_bucket)
-            min_b, max_b = suppress_envelope_edge_overshoot(min_b, max_b, samples_per_bucket)
-        trace_a = (min_a + max_a) / 2.0
-        trace_b = (min_b + max_b) / 2.0
-        self._envelope_channels = {
-            channel for channel, lo, hi in ((1, min_a, max_a), (2, min_b, max_b))
-            if np.any(lo != hi)
-        }
-        trigger_index = self._clamped_trigger_index(frame, len(trace_a))
-        x = (np.arange(len(trace_a), dtype=np.float64) - trigger_index) / sample_rate
+        trigger_index = self._clamped_trigger_index(frame, len(min_a))
+        x = (np.arange(len(min_a), dtype=np.float64) - trigger_index) / sample_rate
         self._has_trigger_alignment = trigger_index > 0
         self._set_time_range()
         self._envelope_active = True
-        # 中心线保留在主曲线上，便于旧版调用方读取；可视范围由
-        # Min/Max 曲线和填充带表达，不再用中心线替代包络。
-        self.curve_a.setData(x, self._to_divisions(self._codes_to_volts(trace_a, 1), 1))
-        self.curve_b.setData(x, self._to_divisions(self._codes_to_volts(trace_b, 2), 2))
-        self.min_a.setData(x, self._to_divisions(self._codes_to_volts(min_a, 1), 1))
-        self.max_a.setData(x, self._to_divisions(self._codes_to_volts(max_a, 1), 1))
-        self.min_b.setData(x, self._to_divisions(self._codes_to_volts(min_b, 2), 2))
-        self.max_b.setData(x, self._to_divisions(self._codes_to_volts(max_b, 2), 2))
+        self._envelope_channels = set()
+        for channel, curve, minimum, maximum, lo, hi in (
+            (1, self.curve_a, self.min_a, self.max_a, min_a, max_a),
+            (2, self.curve_b, self.min_b, self.max_b, min_b, max_b),
+        ):
+            ideal = idealize_square_display(x, lo, hi)
+            if ideal is not None:
+                display_x, codes = ideal
+                curve.setData(display_x, self._to_divisions(self._codes_to_volts(codes, channel), channel))
+                minimum.clear()
+                maximum.clear()
+            else:
+                # 非方波或平台已不可分辨时继续绘制真实包络，不能凭空重建。
+                curve.setData(x, self._to_divisions(self._codes_to_volts((lo + hi) / 2, channel), channel))
+                minimum.setData(x, self._to_divisions(self._codes_to_volts(lo, channel), channel))
+                maximum.setData(x, self._to_divisions(self._codes_to_volts(hi, channel), channel))
+                if np.any(lo != hi):
+                    self._envelope_channels.add(channel)
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 

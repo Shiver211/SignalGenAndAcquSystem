@@ -77,19 +77,31 @@ module ad9226_capture (
         (.src_clk(clk_adc_read_65m), .src_in(overflow_read), .dest_clk(clk_sample_130m), .dest_out(overflow_sample));
     reg running, second_sample, underflow_seen;
     reg [12:0] held_b;
+    reg emit_second;
+    wire [11:0] calibrated_a, calibrated_b;
+    wire calibrated_otr_a, calibrated_otr_b, pair_valid;
     wire transport_ready = settled_sample && !rd_busy && (mode_sample == interleave_enable);
     assign overflow = overflow_sample || underflow_seen;
     assign sample_ready = running && transport_ready && !overflow;
     assign pair_pop = sample_ready && !second_sample && !fifo_empty;
+    // 在仍有物理 A/B 标识的成对样本上校准，帧起点与奇偶顺序不影响系数选择。
+    // 本板固定系数；来源 docs/reports/AD9226_calibration_coefficients.json。
+    adc_channel_calibration #(.GAIN_Q16(17'd65125), .BIAS_Q16(32'sd606108)) u_cal_a (
+        .clk(clk_sample_130m), .reset(reset_sample || !sample_ready),
+        .enable(interleave_enable), .valid_in(pair_pop),
+        .code_in(pair_out[11:0]), .otr_in(pair_out[12]),
+        .code_out(calibrated_a), .otr_out(calibrated_otr_a), .valid_out(pair_valid));
+    adc_channel_calibration #(.GAIN_Q16(17'd65952), .BIAS_Q16(-32'sd613811)) u_cal_b (
+        .clk(clk_sample_130m), .reset(reset_sample || !sample_ready),
+        .enable(interleave_enable), .valid_in(pair_pop),
+        .code_in(pair_out[24:13]), .otr_in(pair_out[25]),
+        .code_out(calibrated_b), .otr_out(calibrated_otr_b), .valid_out());
     assign raw_a = code_a ^ 12'hfff;
     assign raw_b = code_b ^ 12'hfff;
     always @(posedge clk_sample_130m) begin
         if (reset_sample) begin
             running <= 0; second_sample <= 0; underflow_seen <= 0;
-            held_b <= 0; code_a <= 0; code_b <= 0; otr_a <= 0; otr_b <= 0;
-            sample_valid <= 0; sample_count <= 0;
         end else begin
-            sample_valid <= 0;
             if (clear_errors) underflow_seen <= 0;
             if (!transport_ready) begin
                 running <= 0; second_sample <= 0; underflow_seen <= 0;
@@ -98,20 +110,31 @@ module ad9226_capture (
                 if (pair_count >= 7'd8 && !overflow) running <= 1;
             end else if (sample_ready) begin
                 second_sample <= !second_sample;
-                if (!second_sample) begin
-                    if (fifo_empty) begin underflow_seen <= 1; running <= 0; end
-                    else begin
-                        held_b <= pair_out[25:13];
-                        code_a <= channel_mask[0] ? pair_out[11:0] : 12'd0;
-                        otr_a <= channel_mask[0] && pair_out[12];
-                        code_b <= !interleave_enable && channel_mask[1] ? pair_out[24:13] : 12'd0;
-                        otr_b <= !interleave_enable && channel_mask[1] && pair_out[25];
-                        sample_valid <= 1; sample_count <= sample_count + 1'b1;
-                    end
-                end else if (interleave_enable) begin
-                    code_a <= held_b[11:0]; otr_a <= held_b[12]; code_b <= 0; otr_b <= 0;
-                    sample_valid <= 1; sample_count <= sample_count + 1'b1;
+                if (!second_sample && fifo_empty) begin
+                    underflow_seen <= 1; running <= 0;
                 end
+            end
+        end
+    end
+    always @(posedge clk_sample_130m) begin
+        if (reset_sample) begin
+            held_b <= 0; emit_second <= 0; code_a <= 0; code_b <= 0;
+            otr_a <= 0; otr_b <= 0; sample_valid <= 0; sample_count <= 0;
+        end else begin
+            sample_valid <= 0;
+            if (!sample_ready) emit_second <= 0;
+            else if (pair_valid) begin
+                held_b <= {calibrated_otr_b, calibrated_b};
+                emit_second <= interleave_enable;
+                code_a <= channel_mask[0] ? calibrated_a : 12'd0;
+                otr_a <= channel_mask[0] && calibrated_otr_a;
+                code_b <= !interleave_enable && channel_mask[1] ? calibrated_b : 12'd0;
+                otr_b <= !interleave_enable && channel_mask[1] && calibrated_otr_b;
+                sample_valid <= 1; sample_count <= sample_count + 1'b1;
+            end else if (emit_second) begin
+                emit_second <= 0;
+                code_a <= held_b[11:0]; otr_a <= held_b[12]; code_b <= 0; otr_b <= 0;
+                sample_valid <= 1; sample_count <= sample_count + 1'b1;
             end
         end
     end

@@ -92,6 +92,8 @@ def main():
             raise RuntimeError(f"RAW 描述符不符合交织配置：{raw.header}")
         decoded=decode_raw32(raw.payload,raw.header.channel_mask)
         samples=decoded["a"]
+        if result["configured"].get("adc_calibration_active") and raw.header.flags & 0x300 != 0x300:
+            raise RuntimeError("交织校准标志错误")
         np.savez(args.output.with_suffix(".npz"),code=samples,otr=decoded["otr_a"],sample_rate_hz=raw.header.sample_rate_hz)
         result["raw"]=fit_sine(samples,raw.header.sample_rate_hz,args.frequency)
         save_waveform(samples,raw.header.sample_rate_hz,args.frequency,args.output.with_suffix(".png"))
@@ -106,7 +108,8 @@ def main():
         control.ok(Command.ENVELOPE_ENABLE,b"\x01")
         frames=receive_frames(sock,control,{SampleFormat.ENVELOPE32,SampleFormat.MEASUREMENT_V1},8)
         for frame in frames.values():
-            if frame.header.channel_mask!=1 or not frame.header.flags&0x100:
+            required_flags = 0x300 if result["configured"].get("adc_calibration_active") else 0x100
+            if frame.header.channel_mask!=1 or frame.header.flags & required_flags != required_flags:
                 raise RuntimeError("包络或测量未标记交织模式")
         env=frames[SampleFormat.ENVELOPE32]
         result["envelope"]={"points":env.header.total_samples,"sample_rate_hz":env.header.sample_rate_hz}
@@ -125,7 +128,8 @@ def main():
                               abs(result["raw"]["frequency_error_percent"])<=1 and
                               measurement.period_valid_a and
                               abs(result["measurement"]["frequency_error_percent"])<=1 and
-                              not result["status"]["sample_overflow"] and
+                              not result["status"]["sample_overflow"] and not measurement.calculation_overrun and
+                              measurement.otr_count_a == 0 and
                               result["raw"]["otr_count"]==0)
         result["minmax_amplitude_passed"]=abs(result["measurement"]["amplitude_error_percent"])<=3
         result["passed"]=result["sine_fit_passed"] and result["minmax_amplitude_passed"]

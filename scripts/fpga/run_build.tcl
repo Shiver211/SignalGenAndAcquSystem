@@ -8,7 +8,7 @@ set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs synth_1]
 set_property INCREMENTAL_CHECKPOINT "" [get_runs synth_1]
 puts "M7_SYNTH_INCREMENTAL_DISABLED"
 
-set m7_rtl_files [glob -nocomplain [file join $project_root rtl network *.v]]
+set m7_rtl_files [concat [glob -nocomplain [file join $project_root rtl network *.v]] [glob -nocomplain [file join $project_root rtl acquire *.v]]]
 
 foreach source_file $m7_rtl_files {
     if {[llength [get_files -quiet $source_file]] == 0} {

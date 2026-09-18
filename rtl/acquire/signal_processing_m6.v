@@ -364,7 +364,7 @@ module signal_processing_m6 #(
         .trigger_index  (32'd0),
         .channel_mask   ({6'd0, channel_mask}),
         .sample_format  ((channel_mask == 2'b11) ? 8'h02 : 8'h06),
-        .flags          (interleave_enable ? 16'h0100 : 16'd0),
+        .flags          (interleave_enable ? 16'h0300 : 16'd0),
         .decimation     (bucket_size),
         .descriptor     (envelope_descriptor)
     );
@@ -377,7 +377,7 @@ module signal_processing_m6 #(
         .trigger_index  (32'd0),
         .channel_mask   ({6'd0, channel_mask}),
         .sample_format  (8'h03),
-        .flags          ({7'd0, interleave_enable, 5'd0, calculation_overrun,
+        .flags          ({6'd0, interleave_enable, interleave_enable, 5'd0, calculation_overrun,
                           period_valid_b, period_valid_a}),
         .decimation     (32'd1),
         .descriptor     (measurement_descriptor)

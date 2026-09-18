@@ -263,7 +263,7 @@ module ddr3_subsystem_m6 (
         .sample_rate_hz(raw_frame_interleave ? 32'd130_000_000 : 32'd65_000_000), .trigger_index(frame_trigger_index),
         .channel_mask({6'd0, raw_frame_channel_mask_ui}),
         .sample_format((raw_frame_channel_mask_ui == 2'b11) ? 8'h01 : 8'h05),
-        .flags({7'd0, raw_frame_interleave, 7'd0, frame_wrapped}),
+        .flags({6'd0, raw_frame_interleave, raw_frame_interleave, 7'd0, frame_wrapped}),
         .decimation(32'd1), .descriptor(raw_descriptor)
     );
 

@@ -565,13 +565,13 @@ module reg_file #(
                                         response_len     <= 8'd32;
                                         response_payload <= {(MAX_PAYLOAD_BYTES * 8){1'b0}};
                                         response_payload[0  * 8 +: 8]  <= 8'd1;
-                                        response_payload[1  * 8 +: 8]  <= 8'd1;
+                                        response_payload[1  * 8 +: 8]  <= 8'd3;
                                         response_payload[2  * 8 +: 8]  <= 8'd0;
-                                        response_payload[3  * 8 +: 8]  <= 8'd4;
-                                        response_payload[4  * 8 +: 8]  <= 8'd0;
+                                        response_payload[3  * 8 +: 8]  <= 8'd5;
+                                        response_payload[4  * 8 +: 8]  <= 8'd1;
                                         response_payload[5  * 8 +: 8]  <= status_flags;
                                         response_payload[6  * 8 +: 8]  <= last_error;
-                                        response_payload[7  * 8 +: 8]  <= {5'd0, adc_stream_overflow, adc_sample_ready && adc_processing_ready, adc_mode_status};
+                                        response_payload[7  * 8 +: 8]  <= {4'd0, adc_mode_status, adc_stream_overflow, adc_sample_ready && adc_processing_ready, adc_mode_status};
                                         response_payload[8  * 8 +: 32] <= crc_error_count;
                                         response_payload[12 * 8 +: 32] <= uart_frame_error_count;
                                         response_payload[16 * 8 +: 32] <= command_error_count;

@@ -71,12 +71,12 @@ module tb_interleave_m8;
     wire packet_request;
     wire [15:0] packet_flags;
     wire [207:0] packet_descriptor;
-    wire [207:0] test_descriptor = {39'd0, mode, 168'd0};
+    wire [207:0] test_descriptor = {38'd0, mode, mode, 168'd0};
     integer checked_mode_headers=0;
     always @(posedge clk130) begin
         ready_seen<=ready;
         if(packet_request) begin
-            if(packet_flags !== (mode ? 16'h0103 : 16'h0003))
+            if(packet_flags !== (mode ? 16'h0303 : 16'h0003))
                 $fatal(1,"UDP 交织标志丢失 flags=%h",packet_flags);
             checked_mode_headers=checked_mode_headers+1;
         end
@@ -90,20 +90,86 @@ module tb_interleave_m8;
         .measurement_valid(ready && !ready_seen),.measurement_descriptor(test_descriptor),
         .measurement_data(368'd0),.app_request_valid(packet_request),.app_request_ready(1'b1),
         .app_descriptor(packet_descriptor),.app_flags(packet_flags),.app_payload_ready(1'b1));
-    reg check_enable=0;
-    reg have_previous=0;
-    reg [11:0] previous_a;
-    integer checked=0;
+    // 校准启用后逐点参考：检查物理 A/B 系数、旁路、饱和、OTR 以及流水顺序。
+    reg [12:0] reference_samples[0:8191];
+    integer ref_write=0, ref_read=0, calibrated_checked=0;
+    reg have_previous_pair=0;
+    reg [11:0] previous_pair_a;
+    function [11:0] calibrated_reference;
+        input [11:0] x;
+        input [16:0] gain;
+        input signed [31:0] bias;
+        reg signed [63:0] value;
+        begin
+            value = $signed({1'b0,x}) - 64'sd2048;
+            value = (value * $signed({1'b0,gain}) + bias + 64'sd32768) >>> 16;
+            value = value + 2048;
+            calibrated_reference = value < 0 ? 0 : value > 4095 ? 4095 : value[11:0];
+        end
+    endfunction
     always @(posedge clk130) begin
-        if (!ready || !check_enable) have_previous<=0;
-        else if(valid) begin
-            if(have_previous && a !== ((previous_a + (mode?1:2)) & 12'hfff))
-                $fatal(1,"顺序错误 mode=%d previous=%h a=%h",mode,previous_a,a);
-            if(oa !== a[3] || (!mode && (b !== a || ob !== b[3])))
-                $fatal(1,"数据或 OTR 未对齐 a=%h b=%h",a,b);
-            previous_a<=a; have_previous<=1; checked<=checked+1;
+        if(!ready) begin ref_write=0; ref_read=0; have_previous_pair=0; end
+        else begin
+            if(front.pair_pop) begin
+                if(have_previous_pair && front.pair_out[11:0] !== ((previous_pair_a+2)&12'hfff))
+                    $fatal(1,"ADC 采样顺序错误");
+                if(front.pair_out[24:13] !== ((front.pair_out[11:0]+(mode?1:0))&12'hfff) ||
+                   front.pair_out[12] !== front.pair_out[3] || front.pair_out[25] !== front.pair_out[16])
+                    $fatal(1,"ADC 模型边沿或 OTR 错误");
+                previous_pair_a=front.pair_out[11:0];have_previous_pair=1;
+                reference_samples[ref_write%8192] = {front.pair_out[12],
+                    mode ? calibrated_reference(front.pair_out[11:0],17'd65125,32'sd606108) : front.pair_out[11:0]};
+                reference_samples[(ref_write+1)%8192] = {front.pair_out[25],
+                    mode ? calibrated_reference(front.pair_out[24:13],17'd65952,-32'sd613811) : front.pair_out[24:13]};
+                ref_write=ref_write+2;
+            end
+            if(valid && ready) begin
+                if({oa,a} !== reference_samples[ref_read%8192])
+                    $fatal(1,"固定系数校准结果/OTR 不一致 index=%d",ref_read);
+                if(!mode && {ob,b} !== reference_samples[(ref_read+1)%8192])
+                    $fatal(1,"双通道未旁路校准");
+                ref_read=ref_read+(mode?1:2); calibrated_checked=calibrated_checked+1;
+            end
         end
         if(front_overflow) $fatal(1,"前端溢出");
+    end
+    // 已删除的 ADC 校准命令应返回 UNKNOWN_CMD，不得再改变配置。
+    reg cv=0, cfg_done=0;
+    reg [7:0] cmd=0, cmd_len=0;
+    reg [255:0] payload=0;
+    wire cr, rv, cfg_send;
+    wire [7:0] status, response_length;
+    wire [255:0] response_payload;
+    wire [169:0] config_data;
+    reg_file registers(.clk(clk130),.reset(reset),.command_valid(cv),.command_ready(cr),
+        .command_cmd(cmd),.command_len(cmd_len),.command_payload(payload),.command_status(8'd0),
+        .uart_frame_error(1'b0),.response_ready(1'b1),.response_valid(rv),.response_status(status),
+        .response_len(response_length),.response_payload(response_payload),.adc_config_data(config_data),
+        .adc_config_send(cfg_send),.adc_config_busy(1'b0),.adc_config_done(cfg_done),
+        .adc_sample_ready(1'b1),.adc_processing_ready(1'b1),.adc_stream_overflow(1'b0),
+        .adc_mode_status(mode),.adc_armed_status(1'b0),.ddr_calibrated(1'b1),.network_link_up(1'b1),
+        .adc_clock_alive(1'b1),.mmcm_locked(1'b1),.dac_update_rate_ch1_hz(32'd1),
+        .dac_update_rate_ch2_hz(32'd1),.adc_clear_count(16'd0),.raw_frame_valid(1'b0),
+        .raw_frame_id(32'd0),.raw_frame_total_bytes(32'd0),.raw_frame_channel_mask(8'd1),.raw_upload_ready(1'b1));
+    always @(posedge clk130) cfg_done <= cfg_send;
+    task calibration_command;
+        input [7:0] command, length, expected_status;
+        input [255:0] data;
+        begin
+            @(negedge clk130); wait(cr); cmd=command;cmd_len=length;payload=data;cv=1;
+            @(negedge clk130);cv=0;
+            wait(rv);#1;
+            if(status!==expected_status) $fatal(1,"校准命令应答错误 %h",status);
+            @(negedge clk130);
+        end
+    endtask
+    reg protocol_checked=0;
+    initial begin
+        wait(!reset);
+        calibration_command(8'h0c,16,2,{128'd0,32'sd32768,32'd66000,-32'sd32768,32'd65000});
+        calibration_command(8'h0d,0,2,256'd0);
+        if(cfg_send) $fatal(1,"已删除命令触发了配置更新");
+        protocol_checked=1;
     end
     localparam integer DEPTH=1_000_003;
     reg armed=0;
@@ -153,10 +219,10 @@ module tb_interleave_m8;
     end
     initial begin
         #150; reset=0;
-        wait(ready); repeat(10) @(posedge clk130); check_enable=1;
+        wait(ready); repeat(10) @(posedge clk130);
         repeat(12000) @(posedge clk130);
-        check_enable=0; @(negedge clk130); mode=1;
-        wait(!ready); wait(ready); repeat(10) @(posedge clk130); check_enable=1;
+        @(negedge clk130); mode=1;
+        wait(!ready); wait(ready); repeat(10) @(posedge clk130);
         armed=1;
         wait(accepted>=1000); @(negedge ui_clk); app_ready=0;
         repeat(80) @(negedge ui_clk); app_ready=1;
@@ -164,12 +230,13 @@ module tb_interleave_m8;
         if(!frame_valid || !frame_wrapped || frame_start!=999996 ||
            frame_total!=DEPTH || written!=DEPTH || accepted!=DEPTH)
             $fatal(1,"帧长度错误 %d/%d",accepted,written);
-        check_enable=0; @(negedge clk130); mode=0;
-        wait(!ready); wait(ready); repeat(10) @(posedge clk130); check_enable=1;
+        @(negedge clk130); mode=0;
+        wait(!ready); wait(ready); repeat(10) @(posedge clk130);
         repeat(12000) @(posedge clk130);
         if(measured_dual<2 || measured_interleave<1) $fatal(1,"两种采样率未完成测频");
         if(checked_mode_headers!=3) $fatal(1,"未检查三次模式对应的 UDP 标志");
-        $display("M8_INTERLEAVE_SIM_PASS checked=%d DDR=%d",checked,written); $finish;
+        if(calibrated_checked<DEPTH || !protocol_checked) $fatal(1,"固定校准验证不足");
+        $display("M8_INTERLEAVE_SIM_PASS checked=%d DDR=%d",calibrated_checked,written); $finish;
     end
     initial begin #12000000; $fatal(1,"联调超时"); end
 endmodule

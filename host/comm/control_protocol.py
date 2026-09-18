@@ -237,6 +237,7 @@ def parse_device_status(payload: bytes) -> dict[str, object]:
         "mmcm_locked": bool(flags & 0x40),
         "last_error": payload[6],
         "interleave_supported": (payload[0], payload[1]) >= (1, 1),
+        "adc_calibration_active": (payload[0], payload[1]) >= (1, 2) and bool(payload[7] & 8),
         "sampling_mode": payload[7] & 1,
         "sample_ready": bool(payload[7] & 2),
         "sample_overflow": bool(payload[7] & 4),

@@ -464,6 +464,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sampling_mode_combo.blockSignals(False)
             self.statusBar().showMessage("请先连接支持交织的固件，并等待当前采集上传结束", 5000)
             return
+        mask = 1 if mode else 3
+        rate = INTERLEAVE_SAMPLE_RATE_HZ if mode else ADC_SAMPLE_RATE_HZ
+        depth = max(1, min(RAW_MAX_SAMPLES, int(ceil(rate * float(self.timebase_combo.currentData()) * 10))))
+        payload = acquisition_payload(
+            0, self.threshold_spin.value(), self.hysteresis_spin.value(),
+            self.trigger_edge.currentIndex(), depth, self.pretrigger_spin.value(),
+            channel_mask=mask, sampling_mode=mode, commit=True)
         self._mode_switching = True
         self._mode_deadline = monotonic() + 30.0
         self._mode_target = mode
@@ -473,17 +480,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capture_button.setEnabled(False)
         self.udp_receiver.discard_pending()
         self._clear_continuous_measurement()
-        mask = 1 if mode else 3
-        rate = INTERLEAVE_SAMPLE_RATE_HZ if mode else ADC_SAMPLE_RATE_HZ
-        depth = max(1, min(RAW_MAX_SAMPLES, int(ceil(rate * float(self.timebase_combo.currentData()) * 10))))
-        self._mode_steps = [
-            (Command.STOP, b""),
-            (Command.ENVELOPE_ENABLE, b"\x00"),
-            (Command.SET_ACQUISITION, acquisition_payload(
-                0, self.threshold_spin.value(), self.hysteresis_spin.value(),
-                self.trigger_edge.currentIndex(), depth, self.pretrigger_spin.value(),
-                channel_mask=mask, sampling_mode=mode, commit=True)),
-        ]
+        self._mode_steps = [(Command.STOP, b""), (Command.ENVELOPE_ENABLE, b"\x00"), (Command.SET_ACQUISITION, payload)]
         self._send_mode_step()
 
     def _send_mode_step(self) -> None:
@@ -756,7 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # STOP 后旧 RAW 帧可能仍在上传；等待传输结束再提交模式。
                 self._mode_steps.insert(0, self._mode_command)
                 self._mode_retry.start(100)
-                self.statusBar().showMessage("正在等待 RAW 上传完成，再切换采样模式")
+                self.statusBar().showMessage("正在等待 RAW 上传完成，再提交配置")
             else:
                 self._fail_mode_switch(response.status_name)
             return

@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 from PyQt5 import QtCore, QtWidgets
-from host.comm.control_protocol import Command, Response, acquisition_payload, parse_device_status
+from host.comm.control_protocol import (
+    Command, Response, acquisition_payload, parse_device_status,
+)
+from host.comm.data_protocol import decode_raw32
 from host.ui.main_window import MainWindow
 
 class InterleaveTest(unittest.TestCase):
@@ -67,5 +70,43 @@ class InterleaveTest(unittest.TestCase):
                 w.channel_mode_combo.setCurrentIndex(2)
                 w._on_response(0,Response(Command.QUERY_STATUS,0,bytes(status)))
                 self.assertEqual(w._channel_mask(),2)
+            finally:
+                w.close()
+
+    def test_fixed_calibration_status_does_not_send_configuration(self):
+        status = bytearray(32); status[0:2] = bytes((1, 3)); status[7] = 11
+        self.assertTrue(parse_device_status(status)['adc_calibration_active'])
+        decoded = decode_raw32(struct.pack('<HHH', 0x1800, 0x0123, 0x0FFF), 1)
+        self.assertEqual(decoded['a'].tolist(), [2048, 291, 4095])
+        self.assertEqual(decoded['otr_a'].tolist(), [True, False, False])
+        with tempfile.TemporaryDirectory() as directory:
+            settings = QtCore.QSettings(str(Path(directory)/'fixed.ini'), QtCore.QSettings.IniFormat)
+            settings.setValue('adc_cal/ch1_gain', 0.5)
+            settings.setValue('adc_cal/ch1_offset', 1.0)
+            settings.setValue('interleave_cal/A_gain', 1.2)
+            w = MainWindow(Path(directory)/'test.db', auto_connect=False, settings=settings)
+            try:
+                w._uart_connected = True
+                w.serial_link.send_command = Mock()
+                w._on_response(0, Response(Command.QUERY_STATUS, 0, bytes(status)))
+                w.serial_link.send_command.assert_not_called()
+                self.assertEqual(w._sampling_mode, 1)
+                self.assertFalse(hasattr(w, 'apply_interleave_calibration_button'))
+                self.assertEqual(w.calibrate_buttons[1].text(), '校准 CH1')
+                self.assertTrue(w.calibrate_buttons[1].isEnabled())
+                self.assertFalse(w.calibrate_buttons[2].isEnabled())
+                # 保留用户的显示幅度校准，但不向 FPGA 写入交织系数。
+                self.assertEqual(w._adc_gain[1], 0.5)
+                self.assertEqual(w._adc_offset[1], 1.0)
+                from host.comm.data_protocol import decode_measurement_v1
+                from host.core.waveform import code_to_voltage, format_voltage, vpp_from_code_span
+                from host.tests.test_main_window_frame_selection import dual_measurement_payload
+                measurement = decode_measurement_v1(dual_measurement_payload())
+                w._render_measurement(measurement, 3)
+                self.assertEqual(w.measurement_labels[0].text(), format_voltage(
+                    code_to_voltage(measurement.min_a, gain=0.5, offset_v=1.0)))
+                self.assertEqual(w.measurement_labels[2].text(), format_voltage(
+                    vpp_from_code_span(measurement.vpp_a, gain=0.5), peak_to_peak=True))
+                w.serial_link.send_command.assert_not_called()
             finally:
                 w.close()

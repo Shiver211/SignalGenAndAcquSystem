@@ -187,7 +187,7 @@ module network_data_scheduler_m7 (
                         (state == S_ENV_PAYLOAD)) ?
                            {14'd0, env_last_chunk,
                             (env_point_index_latched == 32'd0)} : 16'h0003;
-    assign app_flags = chunk_flags | (app_descriptor[175:160] & 16'h0100);
+    assign app_flags = chunk_flags | (app_descriptor[175:160] & 16'h0300);
     assign app_payload_length = ((state == S_RAW_PREPARE) ||
                                  (state == S_RAW_PAYLOAD)) ? raw_chunk_length :
                                 ((state == S_ENV_PREPARE) || (state == S_ENV_FETCH) ||

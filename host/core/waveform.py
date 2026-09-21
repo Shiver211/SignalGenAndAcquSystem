@@ -84,6 +84,50 @@ def time_axis(sample_count: int, sample_rate_hz: float) -> np.ndarray:
     return np.arange(sample_count, dtype=np.float64) / sample_rate_hz
 
 
+def refine_trigger_position(
+    samples: np.ndarray, level: float, *, falling: bool = False,
+) -> float | None:
+    """细化连续帧起点的触发位置，返回相对首点的浮点样本下标。
+
+    输入须为触发通道未压缩的 ADC 码，level 是计入迟滞后的实际触发电平。
+    帧内只有部分周期也能使用；只拟合起点附近，不依赖整帧均值或周期。
+    不具备可靠局部斜率时返回 None，保留硬件给出的起点。
+    """
+    values = (np.asarray(samples[:256], dtype=np.float64) - level) * (
+        -1.0 if falling else 1.0
+    )
+    if len(values) < 16 or values[0] < 0:
+        return None
+
+    # 64 码约为 ADC 满量程的 1.6%。缓慢边沿需要更多点来区分斜率与噪声。
+    for size in (16, 32, 64, 128, 256):
+        if size > len(values):
+            break
+        y = values[:size]
+        x = np.arange(size, dtype=np.float64)
+        centered_x = x - x.mean()
+        slope = float(np.dot(centered_x, y) / np.dot(centered_x, centered_x))
+        intercept = float(y.mean() - slope * x.mean())
+        span = slope * (size - 1)
+        if span >= 64.0:
+            break
+
+    residual = float(np.sqrt(np.mean((y - (slope * x + intercept)) ** 2)))
+    if span < max(8.0, 6.0 * residual):
+        return None
+    # 两半斜率应接近，避免把正弦峰顶、方波跳变或多个周期拟合成直线。
+    half = len(y) // 2
+    half_x = np.arange(half, dtype=np.float64) - (half - 1) / 2
+    half_slopes = y.reshape(2, half) @ half_x / np.dot(half_x, half_x)
+    if np.max(np.abs(half_slopes - slope)) > slope * 0.5:
+        return None
+    position = -intercept / slope
+    # 当前协议不区分自动超时帧；只接受首点附近的交点，不另找后续边沿。
+    if abs(position) > len(y) / 4:
+        return None
+    return float(position)
+
+
 def median_filter_3(samples: np.ndarray) -> np.ndarray:
     """用于波形显示的形状保持三点中值滤波。
 

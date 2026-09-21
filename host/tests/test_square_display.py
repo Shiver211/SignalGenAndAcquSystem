@@ -244,7 +244,8 @@ class IdealSquareWidgetTest(unittest.TestCase):
     def test_envelope_mixed_channels_scale_and_return_to_sine(self) -> None:
         count, bucket = 3250, 2
         square = noisy_square(1_000_000, count)
-        sine = np.sin(2 * np.pi * np.arange(count) * 800_000 / ADC_SAMPLE_RATE_HZ)
+        # 桶内幅差需超过 0.1 格，才能验证包络填充及后续的幅度缩放。
+        sine = 2 * np.sin(2 * np.pi * np.arange(count) * 800_000 / ADC_SAMPLE_RATE_HZ)
         a = np.rint((square + 5) / 10 * 4095).astype(np.uint16)
         b = np.rint((sine + 5) / 10 * 4095).astype(np.uint16)
         offsets = np.arange(0, count, bucket)

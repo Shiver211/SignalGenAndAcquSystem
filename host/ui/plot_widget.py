@@ -14,11 +14,12 @@ from PyQt5 import QtWidgets
 import pyqtgraph as pg
 
 from host.comm.data_protocol import (
-    CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
+    INTERLEAVE_FLAG, CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
+from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
 from host.core.waveform import (
     clean_square_waveform, codes_to_voltage, fft_spectrum,
-    idealize_square_display,
+    idealize_square_display, refine_trigger_position,
 )
 
 
@@ -97,6 +98,8 @@ class PlotWidget(QtWidgets.QWidget):
         self._adc_gain = {1: 1.0, 2: 1.0}
         self._adc_offset = {1: 0.0, 2: 0.0}
         self._last_frame: CompletedFrame | None = None
+        self._trigger_alignment: tuple[int, float, bool] | None = None
+        self._frame_trigger_alignment: tuple[int, float, bool] | None = None
         self._has_trigger_alignment = False
         self._envelope_active = False
         self._configure_grid()
@@ -249,20 +252,41 @@ class PlotWidget(QtWidgets.QWidget):
 
     set_time_per_div = set_timebase
 
+    def set_trigger_alignment(
+        self, channel: int | None, threshold: int = 2048,
+        hysteresis: int = 16, falling: bool = False,
+    ) -> None:
+        """设置后续连续帧使用的已提交触发参数；None 暂停校正。"""
+        if channel is None:
+            self._trigger_alignment = None
+            return
+        channel = self._validate_channel(channel)
+        level = np.clip(threshold + (-hysteresis if falling else hysteresis), 0, 4095)
+        self._trigger_alignment = (channel, float(level), bool(falling))
+
     def clear_frame(self) -> None:
         """清除当前波形，供采集配置切换时丢弃旧帧。"""
         self._clear_waveforms()
 
     # ---- 数据显示 ------------------------------------------------------
 
-    def display_frame(self, frame: CompletedFrame, max_points: int = 100_000) -> None:
+    def display_frame(
+        self, frame: CompletedFrame, max_points: int = 100_000,
+        *, align_trigger: bool = True,
+    ) -> None:
         """显示 RAW32/DECIMATED32/ENVELOPE64 帧。
 
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
+        已配置触发参数的 1:1 连续帧会细化首点时间；回放可关闭此校正。
         可识别的方波自动整形；其他包络保留 Min/Max 范围。
         长记录先按完整采样去过冲，再按桶内极值抽点。
         """
+        if not align_trigger:
+            self._frame_trigger_alignment = None
+        elif frame is not self._last_frame:
+            # 同一帧重绘沿用原触发配置，避免幅度校准或时基切换改变对齐。
+            self._frame_trigger_alignment = self._trigger_alignment
         self._last_frame = frame
         sample_format = frame.header.sample_format
         if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
@@ -332,6 +356,7 @@ class PlotWidget(QtWidgets.QWidget):
         max_a = values["max_a"].astype(np.float64)
         min_b = values["min_b"].astype(np.float64)
         max_b = values["max_b"].astype(np.float64)
+        trigger_offset = self._envelope_trigger_offset(frame, values)
         # 包络帧的每个点代表一个时间桶，Min/Max 必须分别绘制。
         window_seconds = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
         visible_count = max(1, int(np.ceil(
@@ -342,7 +367,7 @@ class PlotWidget(QtWidgets.QWidget):
             min_b, max_b = min_b[:visible_count], max_b[:visible_count]
         sample_rate = float(frame.header.sample_rate_hz)
         trigger_index = self._clamped_trigger_index(frame, len(min_a))
-        x = (np.arange(len(min_a), dtype=np.float64) - trigger_index) / sample_rate
+        x = (np.arange(len(min_a), dtype=np.float64) - trigger_index - trigger_offset) / sample_rate
         self._has_trigger_alignment = trigger_index > 0
         self._set_time_range()
         self._envelope_active = True
@@ -389,6 +414,26 @@ class PlotWidget(QtWidgets.QWidget):
                     maximum.clear()
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
+
+    def _envelope_trigger_offset(
+        self, frame: CompletedFrame, values: dict[str, np.ndarray],
+    ) -> float:
+        settings = self._frame_trigger_alignment
+        native_rate = (INTERLEAVE_SAMPLE_RATE_HZ if frame.header.flags & INTERLEAVE_FLAG
+                       else ADC_SAMPLE_RATE_HZ)
+        # Min/Max 压缩桶没有桶内时间信息，不能据中心值伪造亚采样触发位置。
+        if (settings is None or frame.header.trigger_index != 0 or
+                frame.header.sample_rate_hz != native_rate):
+            return 0.0
+        channel, level, falling = settings
+        if not frame.header.channel_mask & (1 << (channel - 1)):
+            return 0.0
+        suffix = "a" if channel == 1 else "b"
+        lo, hi = values[f"min_{suffix}"], values[f"max_{suffix}"]
+        if not np.array_equal(lo[:256], hi[:256]):
+            return 0.0
+        position = refine_trigger_position(lo, level, falling=falling)
+        return position if position is not None else 0.0
 
     def _display_fft(self, a: np.ndarray, b: np.ndarray, sample_rate_hz: int) -> None:
         fa, ma = fft_spectrum(a, sample_rate_hz)
@@ -469,6 +514,7 @@ class PlotWidget(QtWidgets.QWidget):
         self.fill_a.setVisible(False)
         self.fill_b.setVisible(False)
         self._last_frame = None
+        self._frame_trigger_alignment = None
         self._envelope_active = False
         self._envelope_channels = set()
         self._has_trigger_alignment = False

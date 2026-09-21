@@ -80,6 +80,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adc_offset = {1: 0.0, 2: 0.0}
         self._uart_connected = False
         self._continuous_running = False
+        self._pending_trigger_alignment: tuple[int, int, tuple[int, int, int, bool]] | None = None
         self._acquisition_mode = AcquisitionMode.CONTINUOUS
         self._sampling_mode = 0
         self._interleave_supported = False
@@ -472,6 +473,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trigger_edge.currentIndex(), depth, self.pretrigger_spin.value(),
             channel_mask=mask, sampling_mode=mode, commit=True)
         self._mode_switching = True
+        self._pending_trigger_alignment = None
+        self.plot_widget.set_trigger_alignment(None)
         self._mode_deadline = monotonic() + 30.0
         self._mode_target = mode
         self._continuous_running = False
@@ -543,6 +546,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._query_status()
 
     def _on_request_failed(self, token: int, error: str) -> None:
+        if (self._pending_trigger_alignment is not None and
+                token in self._pending_trigger_alignment[:2]):
+            self._pending_trigger_alignment = None
         if self._mode_switching and token == self._mode_token:
             self._fail_mode_switch(error)
         self.statusBar().showMessage(error, 5000)
@@ -563,6 +569,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_acquisition(self) -> None:
         if self._mode_switching:
             return
+        self.plot_widget.set_trigger_alignment(None)
+        self._pending_trigger_alignment = None
         self._clear_continuous_measurement()
         was_continuous = self._continuous_running
         if self._uart_connected:
@@ -571,7 +579,7 @@ class MainWindow(QtWidgets.QMainWindow):
         time_per_div = float(self.timebase_combo.currentData())
         requested_depth = int(ceil(self.sample_rate_hz * time_per_div * 10.0))
         capture_depth = max(1, min(RAW_MAX_SAMPLES, requested_depth))
-        self.serial_link.send_command(Command.SET_ACQUISITION, acquisition_payload(
+        acquisition_token = self.serial_link.send_command(Command.SET_ACQUISITION, acquisition_payload(
             self.trigger_source.currentIndex(), self.threshold_spin.value(),
             self.hysteresis_spin.value(), self.trigger_edge.currentIndex(),
             capture_depth, self.pretrigger_spin.value(),
@@ -586,9 +594,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.display_points_spin.setValue(display_points)
         self.mode_combo.setCurrentIndex(DataMode.ENVELOPE)
-        self.serial_link.send_command(Command.SET_PROCESSING, processing_payload(
+        token = self.serial_link.send_command(Command.SET_PROCESSING, processing_payload(
             DataMode.ENVELOPE, int(self.decimation_combo.currentText()),
             display_points, self.refresh_spin.value(), commit=True,
+        ))
+        # SET_PROCESSING 提交整组采集参数；成功应答后再启用新触发配置。
+        self._pending_trigger_alignment = (acquisition_token, token, (
+            self.trigger_source.currentIndex() + 1, self.threshold_spin.value(),
+            self.hysteresis_spin.value(), bool(self.trigger_edge.currentIndex()),
         ))
         if was_continuous:
             self.serial_link.send_command(Command.ENVELOPE_ENABLE, b"\x01")
@@ -716,6 +729,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._interleave_supported = False
         self._status_received = False
         if not connected:
+            self._pending_trigger_alignment = None
+            self.plot_widget.set_trigger_alignment(None)
             self._mode_retry.stop()
             self._mode_switching = False
             self._mode_steps.clear()
@@ -746,6 +761,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(detail, 3000)
 
     def _on_response(self, token: int, response: Response) -> None:
+        if (self._pending_trigger_alignment is not None and
+                token in self._pending_trigger_alignment[:2]):
+            _, commit_token, settings = self._pending_trigger_alignment
+            if not response.ok:
+                self._pending_trigger_alignment = None
+            elif token == commit_token:
+                self._pending_trigger_alignment = None
+                self.plot_widget.set_trigger_alignment(*settings)
         if self._mode_switching and token == self._mode_token:
             if response.ok:
                 self._send_mode_step()
@@ -805,7 +828,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             # 测量包只更新读数，不能覆盖用户准备保存/回放的波形帧。
             self.current_frame = frame
-            self.plot_widget.display_frame(frame)
+            if persist_measurement:
+                self.plot_widget.display_frame(frame)
+            else:
+                # 历史帧没有保存触发参数，不能套用当前设备的触发设置。
+                self.plot_widget.display_frame(frame, align_trigger=False)
             if is_raw:
                 self._clear_continuous_measurement()
                 self._measure_raw_frame(frame)

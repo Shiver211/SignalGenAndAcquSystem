@@ -129,16 +129,21 @@ def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
     ) / 16.0
 
 
-def _prepare_square_waveform(
-    minimum: np.ndarray, maximum: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """显示与幅度测量共用的方波清理，不修改原始采样。
+@dataclass(frozen=True)
+class _SquareLevels:
+    center: np.ndarray
+    state: np.ndarray
+    narrow: np.ndarray
+    residual: np.ndarray
+    low: float
+    high: float
+    span: float
 
-    高低平台须能独立辨认。按平台偏差中位数保留小抖动，异常值回到平台；
-    短于典型平台 15% 的内部反向脉冲视作毛刺。完整跳变只在
-    50% 电平交点插入一对同 X 坐标的端点，不把过渡样本画成多级台阶。
-    压缩包络只能估计交点；平台不可分辨时返回 None，继续显示原包络。
-    """
+
+def _square_levels(
+    minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> _SquareLevels | None:
+    """估计高低平台。不要求能画出竖边沿，供幅度测量单独使用。"""
     lo = np.asarray(minimum, dtype=np.float64)
     hi = lo if maximum is None else np.asarray(maximum, dtype=np.float64)
     if len(lo) < 16:
@@ -150,21 +155,42 @@ def _prepare_square_waveform(
     state = center > (lower + upper) / 2.0
     narrow = hi - lo <= (upper - lower) * 0.1
     low_samples, high_samples = narrow & ~state, narrow & state
-    if (np.count_nonzero(narrow) < len(lo) * 0.25
-            or min(np.count_nonzero(low_samples), np.count_nonzero(high_samples)) < 3):
+    if min(np.count_nonzero(low_samples), np.count_nonzero(high_samples)) < 3:
         return None
     low = float(np.median(center[low_samples]))
     high = float(np.median(center[high_samples]))
     span = high - low
+    if span <= 0:
+        return None
     residual = np.abs(center - np.where(state, high, low))
-    # 平台须占主要部分。只忽略横跨高低电平的边沿桶；斜坡上的部分
-    # 幅度桶必须计入，否则密集正弦的峰谷窄桶会被误判为方波平台。
+    # 只忽略横跨高低电平的边沿桶；斜坡上的部分幅度桶必须计入，
+    # 否则密集正弦的峰谷窄桶会被误判为方波平台。
     edge = (hi - lo) >= span * 0.5
     plateau = residual[~edge]
     if plateau.size == 0 or np.mean(plateau <= span * 0.08) < 0.8:
         return None
+    return _SquareLevels(center, state, narrow, residual, low, high, span)
 
-    boundaries = np.r_[0, np.flatnonzero(state[1:] != state[:-1]) + 1, len(lo)]
+
+def _prepare_square_waveform(
+    minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """显示用的方波清理，不修改原始采样。
+
+    高低平台须能独立辨认。按平台偏差中位数保留小抖动，异常值回到平台；
+    短于典型平台 15% 的内部反向脉冲视作毛刺。完整跳变只在
+    50% 电平交点插入一对同 X 坐标的端点，不把过渡样本画成多级台阶。
+    压缩包络只能估计交点；平台不可分辨时返回 None，继续显示原包络。
+    """
+    levels = _square_levels(minimum, maximum)
+    if levels is None or np.count_nonzero(levels.narrow) < len(levels.center) * 0.25:
+        return None
+    center, state, narrow, residual = (
+        levels.center, levels.state, levels.narrow, levels.residual,
+    )
+    low, high, span = levels.low, levels.high, levels.span
+
+    boundaries = np.r_[0, np.flatnonzero(state[1:] != state[:-1]) + 1, len(center)]
     lengths = np.diff(boundaries)
     if len(lengths) < 3:
         return None
@@ -198,6 +224,20 @@ def clean_square_waveform(
     """返回去过冲、大毛刺且保留小抖动的等间隔样本；非方波返回 None。"""
     prepared = _prepare_square_waveform(minimum, maximum)
     return prepared[0] if prepared is not None else None
+
+
+def square_plateau_stats(
+    minimum: np.ndarray, maximum: np.ndarray | None = None,
+) -> tuple[float, float, float] | None:
+    """方波高低平台和占空比加权均值；不含过冲与平台抖动。
+
+    包络密到无法画竖边沿时，只要还能辨认平台仍返回电平。非方波返回 None。
+    """
+    levels = _square_levels(minimum, maximum)
+    if levels is None:
+        return None
+    mean = float(np.mean(np.where(levels.state, levels.high, levels.low)))
+    return levels.low, levels.high, mean
 
 
 def idealize_square_display(
@@ -256,18 +296,21 @@ def zero_crossing_frequency(samples: np.ndarray, sample_rate_hz: float) -> float
 
 
 def measure_waveform(samples_v: np.ndarray, sample_rate_hz: float) -> WaveformMeasurements:
-    """方波幅度按清理后的样本计算，频率仍由原始采样估计。"""
+    """方波幅度按平台电平计算，频率仍由原始采样估计。"""
     values = np.asarray(samples_v, dtype=np.float64)
     if values.size == 0:
         return WaveformMeasurements(0.0, 0.0, 0.0, 0.0, 0.0)
-    cleaned = clean_square_waveform(values)
-    amplitude = values if cleaned is None else cleaned
-    minimum = float(np.min(amplitude))
-    maximum = float(np.max(amplitude))
+    stats = square_plateau_stats(values)
+    if stats is None:
+        minimum = float(np.min(values))
+        maximum = float(np.max(values))
+        mean = float(np.mean(values))
+    else:
+        minimum, maximum, mean = stats
     return WaveformMeasurements(
         minimum_v=minimum,
         maximum_v=maximum,
-        mean_v=float(np.mean(amplitude)),
+        mean_v=mean,
         vpp_v=maximum - minimum,
         frequency_hz=zero_crossing_frequency(values, sample_rate_hz),
     )

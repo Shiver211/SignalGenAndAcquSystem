@@ -17,7 +17,8 @@ from host.comm.data_protocol import (
     CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, idealize_square_display,
+    clean_square_waveform, codes_to_voltage, fft_spectrum,
+    idealize_square_display,
 )
 
 
@@ -260,7 +261,7 @@ class PlotWidget(QtWidgets.QWidget):
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
         可识别的方波自动整形；其他包络保留 Min/Max 范围。
-        原始帧在压缩时保留桶内极值。
+        长记录先按完整采样去过冲，再按桶内极值抽点。
         """
         self._last_frame = frame
         sample_format = frame.header.sample_format
@@ -300,6 +301,12 @@ class PlotWidget(QtWidgets.QWidget):
             if visible < len(a):
                 a = a[:visible]
                 b = b[:visible]
+        cleaned_a = clean_square_waveform(a)
+        if cleaned_a is not None:
+            a = cleaned_a
+        cleaned_b = clean_square_waveform(b)
+        if cleaned_b is not None:
+            b = cleaned_b
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
@@ -309,8 +316,7 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
         self._envelope_active = False
         for channel, curve, values in ((1, self.curve_a, display_a), (2, self.curve_b, display_b)):
-            ideal = (idealize_square_display(x, values)
-                     if len(indices) == len(a) else None)
+            ideal = idealize_square_display(x, values)
             display_x, display_y = ideal if ideal is not None else (x, values)
             curve.setData(display_x, self._to_divisions(display_y, channel))
         self.trigger_line.setValue(0.0)

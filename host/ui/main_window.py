@@ -27,8 +27,8 @@ from host.config import (
     PC_IP, UART_BAUD, UDP_PORT,
 )
 from host.core.waveform import (
-    clean_square_waveform, code_to_voltage, format_frequency_hz, format_voltage,
-    gain_from_known_vpp, vpp_from_code_span, zero_crossing_frequency,
+    code_to_voltage, format_frequency_hz, format_voltage, gain_from_known_vpp,
+    square_plateau_stats, vpp_from_code_span, zero_crossing_frequency,
 )
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
@@ -820,7 +820,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._square_amplitude_time = 0.0
 
     def _update_square_amplitude(self, frame: CompletedFrame) -> None:
-        # 每帧重建，非方波和无法分辨平台的包络不能沿用上一帧的修正。
+        # 每帧重建。显示无法整形时仍可用平台电平；非方波不能沿用上一帧。
         self._square_amplitude = {}
         self._square_amplitude_mask = frame.header.channel_mask
         self._square_amplitude_time = monotonic()
@@ -829,14 +829,15 @@ class MainWindow(QtWidgets.QMainWindow):
             for channel, name in ((1, "a"), (2, "b")):
                 if not frame.header.channel_mask & channel:
                     continue
-                cleaned = clean_square_waveform(decoded[f"min_{name}"], decoded[f"max_{name}"])
-                if cleaned is None:
+                stats = square_plateau_stats(decoded[f"min_{name}"], decoded[f"max_{name}"])
+                if stats is None:
                     continue
-                minimum, maximum = int(round(cleaned.min())), int(round(cleaned.max()))
+                low, high, mean = stats
+                minimum, maximum = int(round(low)), int(round(high))
                 self._square_amplitude.update({
                     f"min_{name}": minimum, f"max_{name}": maximum,
                     f"vpp_{name}": maximum - minimum,
-                    f"mean_{name}": int(round(cleaned.mean())),
+                    f"mean_{name}": int(round(mean)),
                 })
         self._refresh_continuous_measurement()
 
@@ -889,12 +890,17 @@ class MainWindow(QtWidgets.QMainWindow):
         def stats(codes) -> tuple[int, int, int, int, int, bool]:
             if codes.size == 0:
                 return 0, 0, 0, 0, 0, False
-            cleaned = clean_square_waveform(codes)
-            amplitude = codes if cleaned is None else cleaned
-            minimum = int(round(amplitude.min()))
-            maximum = int(round(amplitude.max()))
+            plateau = square_plateau_stats(codes)
+            if plateau is None:
+                minimum = int(round(codes.min()))
+                maximum = int(round(codes.max()))
+                mean = int(round(codes.mean()))
+            else:
+                low, high, mean_level = plateau
+                minimum, maximum = int(round(low)), int(round(high))
+                mean = int(round(mean_level))
             frequency = zero_crossing_frequency(codes, sample_rate)
-            return (minimum, maximum, maximum - minimum, int(round(amplitude.mean())),
+            return (minimum, maximum, maximum - minimum, mean,
                     int(round(frequency)), frequency > 0)
 
         min_a, max_a, vpp_a, mean_a, freq_a, valid_a = stats(decoded["a"])

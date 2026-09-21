@@ -11,7 +11,9 @@ from PyQt5 import QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.config import ADC_SAMPLE_RATE_HZ, MAX_ENVELOPE_POINTS
-from host.core.waveform import codes_to_voltage, fft_spectrum, idealize_square_display
+from host.core.waveform import (
+    clean_square_waveform, codes_to_voltage, fft_spectrum, idealize_square_display,
+)
 from host.tests.waveform_helpers import sampled_square_with_overshoot
 from host.ui.plot_widget import PlotWidget
 
@@ -189,6 +191,31 @@ class IdealSquareWidgetTest(unittest.TestCase):
             self.assertFalse(np.any(np.diff(x)[jumps] == 0))
         finally:
             widget.close()
+
+    def test_reduced_raw_square_drops_overshoot(self) -> None:
+        count = 200_000
+        source = noisy_square(1_000_000, count)
+        self.assertGreater(float(np.max(np.abs(source))), 1.15)
+        codes = np.rint((source + 5) / 10 * 4095).astype(np.uint16)
+        packed = (codes.astype("<u4") | (codes.astype("<u4") << 12)).tobytes()
+        frame = CompletedFrame(
+            PacketHeader(1, 1, 2, count, ADC_SAMPLE_RATE_HZ, 0, 3,
+                         SampleFormat.RAW32, 0, 0, len(packed), 0), packed,
+        )
+        widget = PlotWidget()
+        try:
+            widget.set_timebase(count / ADC_SAMPLE_RATE_HZ / 10)
+            widget.display_frame(frame, max_points=1000)
+            x, y = widget.curve_a.getData()
+            self.assertLess(len(x), count)
+            self.assertLessEqual(float(np.abs(y).max()), 1.045)
+            self.assertTrue(np.all(np.diff(x) >= 0))
+        finally:
+            widget.close()
+        # 完整采样已去掉过冲，抽点不会把尖峰再选回来。
+        cleaned = clean_square_waveform(codes_to_voltage(codes))
+        self.assertIsNotNone(cleaned)
+        self.assertLessEqual(float(np.abs(cleaned).max()), 1.045)
 
     def test_sine_and_fft_preserve_original_samples_after_square(self) -> None:
         widget = PlotWidget()

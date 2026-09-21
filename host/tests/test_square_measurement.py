@@ -18,7 +18,7 @@ from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.config import ADC_SAMPLE_RATE_HZ, MAX_ENVELOPE_POINTS
 from host.core.waveform import (
     clean_square_waveform, idealize_square_display, measure_waveform,
-    vpp_from_code_span, zero_crossing_frequency,
+    square_plateau_stats, vpp_from_code_span, zero_crossing_frequency,
 )
 from host.tests.test_square_display import noisy_square
 from host.tests.window_helpers import create_window
@@ -56,7 +56,7 @@ def hardware_frame(a, b, mask=3):
 
 
 class SquareMeasurementTest(unittest.TestCase):
-    def test_amplitude_uses_clean_samples_and_keeps_small_jitter(self):
+    def test_amplitude_uses_plateau_levels_not_display_jitter(self):
         for frequency in (500_000, 600_000, 800_000, 1_000_000):
             for phase in (0.1, 0.35, 0.7):
                 with self.subTest(frequency=frequency, phase=phase):
@@ -65,12 +65,12 @@ class SquareMeasurementTest(unittest.TestCase):
                     result = measure_waveform(values, ADC_SAMPLE_RATE_HZ)
                     self.assertAlmostEqual(result.minimum_v, -1, delta=0.04)
                     self.assertAlmostEqual(result.maximum_v, 1, delta=0.04)
-                    self.assertGreater(result.vpp_v, 2.005)  # 保留平台微小噪声。
-                    self.assertLess(result.vpp_v, 2.08)
+                    self.assertAlmostEqual(result.vpp_v, 2.0, delta=0.04)
                     x = np.arange(len(values)) / ADC_SAMPLE_RATE_HZ
                     display_y = idealize_square_display(x, values)[1]
-                    self.assertEqual(result.minimum_v, float(display_y.min()))
-                    self.assertEqual(result.maximum_v, float(display_y.max()))
+                    # 显示保留平台微抖动，测量用中位数电平，二者不必相等。
+                    self.assertGreater(float(display_y.max()), result.maximum_v)
+                    self.assertLess(result.vpp_v, float(display_y.max() - display_y.min()))
                     self.assertEqual(result.frequency_hz, zero_crossing_frequency(values, ADC_SAMPLE_RATE_HZ))
                     np.testing.assert_array_equal(values, original)
 
@@ -99,6 +99,25 @@ class SquareMeasurementTest(unittest.TestCase):
                 lo = np.minimum.reduceat(codes, offsets).astype(np.float64)
                 hi = np.maximum.reduceat(codes, offsets).astype(np.float64)
                 self.assertIsNone(clean_square_waveform(lo, hi))
+                self.assertIsNone(square_plateau_stats(lo, hi))
+
+    def test_unresolved_square_envelope_still_reports_plateau_amplitude(self):
+        # 周期很密时包络画不出竖边沿，幅度仍应按平台而不是过冲。
+        for timebase, frequency in ((100e-6, 800_000), (1e-3, 100_000)):
+            with self.subTest(timebase=timebase, frequency=frequency):
+                count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+                values = noisy_square(frequency, count)
+                codes = to_codes(values)
+                bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+                offsets = np.arange(0, count, bucket)
+                lo = np.minimum.reduceat(codes, offsets).astype(np.float64)
+                hi = np.maximum.reduceat(codes, offsets).astype(np.float64)
+                self.assertIsNone(idealize_square_display(np.arange(len(lo)), lo, hi))
+                stats = square_plateau_stats(lo, hi)
+                self.assertIsNotNone(stats)
+                low, high, _mean = stats
+                self.assertAlmostEqual(vpp_from_code_span(high - low), 2.0, delta=0.08)
+                self.assertLess(high - low, float(codes.max() - codes.min()))
 
     def test_mean_uses_samples_without_extra_drawing_endpoints(self):
         values = np.where(np.arange(1300) % 100 < 20, 1.0, -1.0)
@@ -221,6 +240,19 @@ class SquareMeasurementWindowTest(unittest.TestCase):
                     self.window.acquisition_mode_combo.setCurrentText("连续")
                 self.window._on_frame(hardware)
                 self.assertEqual(self.window._last_measurement.max_a, int(self.a.max()))
+
+    def test_dense_square_envelope_still_corrects_amplitude(self):
+        self.window.timebase_combo.setCurrentText("1 ms/div")
+        count = int(np.ceil(ADC_SAMPLE_RATE_HZ * 1e-3 * 10))
+        a = to_codes(noisy_square(100_000, count))
+        b = to_codes(np.sin(2 * np.pi * np.arange(count) * 10_000 / ADC_SAMPLE_RATE_HZ))
+        self.window._on_frame(envelope_frame(a, b))
+        self.window._on_frame(hardware_frame(a, b), persist_measurement=False)
+        measured = self.window._last_measurement
+        self.assertAlmostEqual(vpp_from_code_span(measured.vpp_a), 2, delta=0.08)
+        self.assertLess(measured.max_a, int(a.max()))
+        self.assertEqual(measured.min_b, int(b.min()))
+        self.assertEqual(measured.max_b, int(b.max()))
 
     def test_expired_waveform_does_not_correct_new_measurement(self):
         self.window._on_frame(envelope_frame(self.a, self.b))

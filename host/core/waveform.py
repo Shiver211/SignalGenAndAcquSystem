@@ -84,19 +84,64 @@ def time_axis(sample_count: int, sample_rate_hz: float) -> np.ndarray:
     return np.arange(sample_count, dtype=np.float64) / sample_rate_hz
 
 
+def _sine_trigger_position(values: np.ndarray) -> float | None:
+    """由正弦相位估计首点附近的上升交点；只用于时间对齐，不生成显示幅值。"""
+    if len(values) < 12 or np.ptp(values) < 16:
+        return None
+    # 正弦相邻点满足 y[n-1]+y[n+1]=2*cos(w)*y[n]+常数。
+    # 先用轻度平滑数据估计角频率，半个周期的短帧也能使用。
+    pilot = smooth_binomial_5(values)[2:-2]
+    recurrence = np.column_stack((pilot[1:-1], np.ones(len(pilot) - 2)))
+    cosine_step = np.linalg.lstsq(recurrence, pilot[:-2] + pilot[2:], rcond=None)[0][0] / 2
+    if not -1 < cosine_step < 1:
+        return None
+    omega = np.arccos(cosine_step)
+    x = np.arange(len(values), dtype=np.float64)
+    # 在原始码值上联合细化频率、相位及直流量，消除短窗均值偏移的影响。
+    for _ in range(3):
+        sine, cosine = np.sin(omega * x), np.cos(omega * x)
+        basis = np.column_stack((sine, cosine, np.ones(len(values))))
+        coefficients = np.linalg.lstsq(basis, values, rcond=None)[0]
+        derivative = x * (coefficients[0] * cosine - coefficients[1] * sine)
+        correction = np.linalg.lstsq(
+            np.column_stack((basis, derivative)), values - basis @ coefficients, rcond=None,
+        )[0][-1]
+        omega += correction
+        if not 0 < omega < np.pi:
+            return None
+    basis = np.column_stack((np.sin(omega * x), np.cos(omega * x), np.ones(len(values))))
+    a, b, dc = np.linalg.lstsq(basis, values, rcond=None)[0]
+    amplitude = np.hypot(a, b)
+    residual = np.sqrt(np.mean((values - basis @ np.array([a, b, dc])) ** 2))
+    # 至少四分之一周期、足够的幅度和拟合质量，才接受正弦模型。
+    if (amplitude < 16 or omega * (len(values) - 1) < np.pi / 2 or
+            residual > amplitude * 0.05 or abs(dc) >= amplitude):
+        return None
+    period = 2 * np.pi / omega
+    position = (np.arcsin(-dc / amplitude) - np.arctan2(b, a)) / omega
+    position = (position + period / 2) % period - period / 2
+    # 硬件已捕获首个越阈值样本，只修正附近的采样量化/噪声误差。
+    return float(position) if -1.5 <= position <= 0.5 else None
+
+
 def refine_trigger_position(
     samples: np.ndarray, level: float, *, falling: bool = False,
 ) -> float | None:
     """细化连续帧起点的触发位置，返回相对首点的浮点样本下标。
 
     输入须为触发通道未压缩的 ADC 码，level 是计入迟滞后的实际触发电平。
-    帧内只有部分周期也能使用；只拟合起点附近，不依赖整帧均值或周期。
-    不具备可靠局部斜率时返回 None，保留硬件给出的起点。
+    高频正弦按相位求交点，避免把弯曲的前段误当直线；其他波形尝试局部
+    斜率拟合。两种估计都不可靠时返回 None，保留硬件给出的起点。
     """
     values = (np.asarray(samples[:256], dtype=np.float64) - level) * (
         -1.0 if falling else 1.0
     )
-    if len(values) < 16 or values[0] < 0:
+    if len(values) < 12 or values[0] < 0:
+        return None
+    position = _sine_trigger_position(values)
+    if position is not None:
+        return position
+    if len(values) < 16:
         return None
 
     # 64 码约为 ADC 满量程的 1.6%。缓慢边沿需要更多点来区分斜率与噪声。

@@ -212,8 +212,10 @@ def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
     return np.convolve(padded, np.array([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0, mode="valid")
 
 
-def smooth_continuous_display(samples: np.ndarray, sample_rate_hz: float) -> np.ndarray:
-    """约 500 kHz 起，对连续波形做保峰的局部二次拟合，仅返回显示副本。
+def smooth_continuous_display(
+    samples: np.ndarray, sample_rate_hz: float, *, start_frequency_hz: float = 500_000,
+) -> np.ndarray:
+    """达到本通道起始频率时做保峰的局部二次拟合，仅返回显示副本。
 
     两路独立估频并使用相同规则：窗口约为周期的 30%，限制为 5..21 点。
     对称拟合保留峰谷曲率及相位；按当前帧采样率检查正弦增益，幅度衰减
@@ -227,8 +229,8 @@ def smooth_continuous_display(samples: np.ndarray, sample_rate_hz: float) -> np.
         return values.copy()
     # 五点平均仅辅助估频，避免零点抖动重复计数，不作为最终显示滤波。
     frequency = zero_crossing_frequency(smooth_binomial_5(values), sample_rate_hz)
-    # 500 kHz 入口留 1% 估频余量，避免同一信号在临界值两侧反复切换。
-    if frequency < 495_000:
+    # 入口留 1% 估频余量，避免同一信号在临界值两侧反复切换。
+    if frequency <= 0 or frequency < start_frequency_hz * 0.99:
         return values.copy()
     period = sample_rate_hz / frequency
     # 正弦本身的相邻差随频率增加，不能固定以满幅 10% 拒绝高频正弦。

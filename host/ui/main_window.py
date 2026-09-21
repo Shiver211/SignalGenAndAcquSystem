@@ -31,7 +31,7 @@ from host.core.waveform import (
     square_plateau_stats, vpp_from_code_span, zero_crossing_frequency,
 )
 from host.db.sqlite_store import SqliteStore
-from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
+from host.ui.plot_widget import ChannelDisplayMode, DEFAULT_SMOOTHING_START_HZ, PlotWidget
 
 
 class AcquisitionMode(IntEnum):
@@ -222,6 +222,20 @@ class MainWindow(QtWidgets.QMainWindow):
         for spin in (self.ch1_position_spin, self.ch2_position_spin):
             spin.setRange(-4, 4); spin.setDecimals(2); spin.setSingleStep(0.1)
             spin.setSuffix(" div")
+        self.smoothing_frequency_spins: dict[int, QtWidgets.QDoubleSpinBox] = {}
+        for channel in (1, 2):
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(1.0, 65_000.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(50.0)
+            spin.setSuffix(" kHz")
+            spin.setKeyboardTracking(False)
+            spin.setToolTip("本通道信号达到该频率时启用显示平滑；修改立即生效并自动保存。")
+            spin.setValue(self.settings.value(
+                f"display/ch{channel}_smoothing_start_hz",
+                DEFAULT_SMOOTHING_START_HZ[channel], type=float,
+            ) / 1000.0)
+            self.smoothing_frequency_spins[channel] = spin
         self.trigger_source = QtWidgets.QComboBox(); self.trigger_source.addItems(["CH A", "CH B"])
         self.trigger_edge = QtWidgets.QComboBox(); self.trigger_edge.addItems(["上升沿", "下降沿"])
         self.threshold_spin = QtWidgets.QSpinBox(); self.threshold_spin.setRange(0, 4095); self.threshold_spin.setValue(2048)
@@ -251,8 +265,10 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("通道模式", self.channel_mode_combo)
         form.addRow("CH1 电压", self.ch1_vdiv_combo)
         form.addRow("CH1 位置", self.ch1_position_spin)
+        form.addRow("CH1 平滑起始频率", self.smoothing_frequency_spins[1])
         form.addRow("CH2 电压", self.ch2_vdiv_combo)
         form.addRow("CH2 位置", self.ch2_position_spin)
+        form.addRow("CH2 平滑起始频率", self.smoothing_frequency_spins[2])
         self._trigger_form_rows = []
         for label, widget in (
             ("触发源", self.trigger_source), ("触发边沿", self.trigger_edge),
@@ -314,6 +330,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
         self.plot_widget.set_volts_per_div(1, float(self.ch1_vdiv_combo.currentData()))
         self.plot_widget.set_volts_per_div(2, float(self.ch2_vdiv_combo.currentData()))
+        for channel, spin in self.smoothing_frequency_spins.items():
+            self.plot_widget.set_smoothing_start_frequency(channel, spin.value() * 1000.0)
         self._apply_adc_calibration()
         self._update_channel_controls()
         layout.addWidget(self.plot_widget, 1)
@@ -392,6 +410,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.replay_button.clicked.connect(self._replay_selected)
         self.delete_record_button.clicked.connect(self._delete_selected)
         for channel in (1, 2):
+            self.smoothing_frequency_spins[channel].valueChanged.connect(
+                lambda value, ch=channel: self._set_smoothing_frequency(ch, value)
+            )
             self.calibrate_buttons[channel].clicked.connect(
                 lambda _checked=False, ch=channel: self._calibrate_amplitude(ch)
             )
@@ -1115,6 +1136,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ch1_position_spin.setEnabled(ch1_active)
         self.ch2_vdiv_combo.setEnabled(ch2_active)
         self.ch2_position_spin.setEnabled(ch2_active)
+        self.smoothing_frequency_spins[1].setEnabled(ch1_active)
+        self.smoothing_frequency_spins[2].setEnabled(ch2_active)
         if getattr(self, "cal_vpp_spins", None):
             for widget in (
                 self.cal_vpp_spins[1], self.calibrate_buttons[1],
@@ -1138,6 +1161,11 @@ class MainWindow(QtWidgets.QMainWindow):
         value = combo.currentData()
         if value is not None:
             self.plot_widget.set_volts_per_div(channel, float(value))
+
+    def _set_smoothing_frequency(self, channel: int, frequency_khz: float) -> None:
+        frequency_hz = frequency_khz * 1000.0
+        self.plot_widget.set_smoothing_start_frequency(channel, frequency_hz)
+        self.settings.setValue(f"display/ch{channel}_smoothing_start_hz", frequency_hz)
 
     def _set_analysis(self, index: int) -> None:
         self.plot_widget.set_fft_enabled(index == 1)

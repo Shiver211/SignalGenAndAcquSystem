@@ -31,6 +31,9 @@ class ChannelDisplayMode(IntEnum):
     CH2 = 2
 
 
+DEFAULT_SMOOTHING_START_HZ = {1: 500_000, 2: 300_000}
+
+
 class PlotWidget(QtWidgets.QWidget):
     """带 10×8 网格和基本分度控制的示波器显示控件。"""
 
@@ -97,6 +100,7 @@ class PlotWidget(QtWidgets.QWidget):
         }
         self._adc_gain = {1: 1.0, 2: 1.0}
         self._adc_offset = {1: 0.0, 2: 0.0}
+        self._smoothing_start_hz = DEFAULT_SMOOTHING_START_HZ.copy()
         self._last_frame: CompletedFrame | None = None
         self._trigger_alignment: tuple[int, float, bool] | None = None
         self._frame_trigger_alignment: tuple[int, float, bool] | None = None
@@ -194,6 +198,20 @@ class PlotWidget(QtWidgets.QWidget):
             codes,
             gain=self._adc_gain[channel],
             offset_v=self._adc_offset[channel],
+        )
+
+    def set_smoothing_start_frequency(self, channel: int, frequency_hz: float) -> None:
+        """只调整本通道显示平滑的起始频率，立即重绘当前帧。"""
+        channel = self._validate_channel(channel)
+        value = float(frequency_hz)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("平滑起始频率必须为正数")
+        self._smoothing_start_hz[channel] = value
+        self._redraw_last_frame()
+
+    def _smooth_display(self, samples: np.ndarray, sample_rate_hz: float, channel: int) -> np.ndarray:
+        return smooth_continuous_display(
+            samples, sample_rate_hz, start_frequency_hz=self._smoothing_start_hz[channel],
         )
 
     def set_volts_per_div(self, channel: int, volts_per_div: float) -> None:
@@ -326,9 +344,9 @@ class PlotWidget(QtWidgets.QWidget):
                 a = a[:visible]
                 b = b[:visible]
         cleaned_a = clean_square_waveform(a)
-        a = cleaned_a if cleaned_a is not None else smooth_continuous_display(a, sample_rate)
+        a = cleaned_a if cleaned_a is not None else self._smooth_display(a, sample_rate, 1)
         cleaned_b = clean_square_waveform(b)
-        b = cleaned_b if cleaned_b is not None else smooth_continuous_display(b, sample_rate)
+        b = cleaned_b if cleaned_b is not None else self._smooth_display(b, sample_rate, 2)
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
@@ -382,7 +400,7 @@ class PlotWidget(QtWidgets.QWidget):
                 maximum.clear()
             else:
                 # 仅平滑中心线；可见的 Min/Max 仍来自 FPGA 的原始包络。
-                center = smooth_continuous_display((lo + hi) / 2.0, sample_rate)
+                center = self._smooth_display((lo + hi) / 2.0, sample_rate, channel)
                 curve.setData(
                     x, self._to_divisions(self._codes_to_volts(center, channel), channel),
                 )

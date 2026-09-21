@@ -1,7 +1,10 @@
 """双通道显示平滑：噪声、幅相、数据格式及原始数据隔离。"""
 
 import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -12,7 +15,8 @@ from PyQt5 import QtWidgets
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.config import ADC_SAMPLE_RATE_HZ
 from host.core.waveform import codes_to_voltage, fft_spectrum, smooth_continuous_display
-from host.ui.plot_widget import PlotWidget
+from host.tests.window_helpers import create_window
+from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
 
 
 def make_frame(a, b, *, envelope=False, mask=3, half_span=0):
@@ -102,6 +106,17 @@ class ContinuousSmoothingTest(unittest.TestCase):
             with self.subTest(rate=rate):
                 self.assertFalse(np.array_equal(smooth_continuous_display(source, rate), source))
 
+    def test_custom_start_frequency_controls_the_gate(self):
+        clean = np.sin(2 * np.pi * np.arange(1300) * 400_000 / ADC_SAMPLE_RATE_HZ)
+        source = clean + np.random.default_rng(21).normal(0, 0.008, len(clean))
+        result = smooth_continuous_display(source, ADC_SAMPLE_RATE_HZ, start_frequency_hz=300_000)
+        self.assertLess(np.std(result[10:-10] - clean[10:-10]),
+                        np.std(source[10:-10] - clean[10:-10]) * 0.6)
+        np.testing.assert_array_equal(
+            smooth_continuous_display(source, ADC_SAMPLE_RATE_HZ, start_frequency_hz=500_000),
+            source,
+        )
+
 
 class DisplaySmoothingTest(unittest.TestCase):
     @classmethod
@@ -169,6 +184,31 @@ class DisplaySmoothingTest(unittest.TestCase):
                 self.assertLess(np.std(shown_b[10:-10] - clean_b[10:-10]),
                                 np.std(codes_to_voltage(b)[10:-10] - clean_b[10:-10]) * 0.6)
 
+    def test_independent_thresholds_redraw_raw_and_envelope(self):
+        signal = np.sin(2 * np.pi * np.arange(650) * 400_000 / ADC_SAMPLE_RATE_HZ)
+        signal += np.random.default_rng(21).normal(0, 0.012, len(signal))
+        codes = np.rint((signal + 5) * 409.5).astype(np.uint16)
+        volts = codes_to_voltage(codes)
+        self.widget.set_timebase(1e-6)
+        for envelope in (False, True):
+            with self.subTest(envelope=envelope):
+                self.widget.set_smoothing_start_frequency(1, 500_000)
+                self.widget.set_smoothing_start_frequency(2, 300_000)
+                frame = make_frame(codes, codes, envelope=envelope)
+                self.widget.display_frame(frame)
+                np.testing.assert_array_equal(self.widget.curve_a.getData()[1], volts)
+                time, smoothed = (values.copy() for values in self.widget.curve_b.getData())
+                self.assertFalse(np.array_equal(smoothed, volts))
+
+                self.widget.set_smoothing_start_frequency(1, 300_000)
+                np.testing.assert_array_equal(self.widget.curve_a.getData()[1], smoothed)
+                np.testing.assert_array_equal(self.widget.curve_b.getData()[1], smoothed)
+                self.widget.set_smoothing_start_frequency(2, 800_000)
+                np.testing.assert_array_equal(self.widget.curve_a.getData()[1], smoothed)
+                np.testing.assert_array_equal(self.widget.curve_b.getData()[1], volts)
+                np.testing.assert_array_equal(self.widget.curve_b.getData()[0], time)
+                self.assertEqual(frame.payload, make_frame(codes, codes, envelope=envelope).payload)
+
     def test_envelope_extrema_and_raw_fft_are_unchanged(self):
         frame = make_frame(*self.codes, envelope=True, half_span=30)
         self.widget.display_frame(frame)
@@ -191,6 +231,64 @@ class DisplaySmoothingTest(unittest.TestCase):
         self.widget.set_fft_enabled(False)
         for expected, curve in zip(before, (self.widget.curve_a, self.widget.curve_b)):
             np.testing.assert_array_equal(curve.getData()[1], expected)
+
+
+class SmoothingFrequencyControlsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_gui_changes_apply_immediately_and_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "smoothing.db"
+            window = create_window(database)
+            window.status_timer.stop()
+            signal = np.sin(2 * np.pi * np.arange(650) * 400_000 / ADC_SAMPLE_RATE_HZ)
+            signal += np.random.default_rng(21).normal(0, 0.012, len(signal))
+            codes = np.rint((signal + 5) * 409.5).astype(np.uint16)
+            frame = make_frame(codes, codes, envelope=True)
+            raw_divisions = codes_to_voltage(codes) / 0.5
+            try:
+                self.assertEqual(window.smoothing_frequency_spins[1].value(), 500.0)
+                self.assertEqual(window.smoothing_frequency_spins[2].value(), 300.0)
+                window.plot_widget.display_frame(frame)
+                np.testing.assert_array_equal(window.plot_widget.curve_a.getData()[1], raw_divisions)
+                smoothed = window.plot_widget.curve_b.getData()[1].copy()
+                self.assertFalse(np.array_equal(smoothed, raw_divisions))
+                # 即使串口已连接，纯显示参数也不会向 FPGA 提交采集配置。
+                window._uart_connected = True
+                with mock.patch.object(window.serial_link, "send_command") as send:
+                    window.smoothing_frequency_spins[1].setValue(300.0)
+                    window.smoothing_frequency_spins[2].setValue(1000.0)
+                    send.assert_not_called()
+                np.testing.assert_array_equal(window.plot_widget.curve_a.getData()[1], smoothed)
+                np.testing.assert_array_equal(window.plot_widget.curve_b.getData()[1], raw_divisions)
+                window.settings.sync()
+            finally:
+                window.close()
+                self.app.processEvents()
+
+            restored = create_window(database)
+            restored.status_timer.stop()
+            try:
+                self.assertEqual(restored.smoothing_frequency_spins[1].value(), 300.0)
+                self.assertEqual(restored.smoothing_frequency_spins[2].value(), 1000.0)
+                restored.plot_widget.display_frame(frame)
+                np.testing.assert_array_equal(restored.plot_widget.curve_a.getData()[1], smoothed)
+                np.testing.assert_array_equal(restored.plot_widget.curve_b.getData()[1], raw_divisions)
+                restored.channel_mode_combo.setCurrentIndex(ChannelDisplayMode.CH1)
+                self.assertTrue(restored.smoothing_frequency_spins[1].isEnabled())
+                self.assertFalse(restored.smoothing_frequency_spins[2].isEnabled())
+                restored.channel_mode_combo.setCurrentIndex(ChannelDisplayMode.CH2)
+                self.assertFalse(restored.smoothing_frequency_spins[1].isEnabled())
+                self.assertTrue(restored.smoothing_frequency_spins[2].isEnabled())
+                restored.channel_mode_combo.setCurrentIndex(ChannelDisplayMode.BOTH)
+                self.assertTrue(all(spin.isEnabled() for spin in restored.smoothing_frequency_spins.values()))
+                self.assertEqual(restored.smoothing_frequency_spins[1].value(), 300.0)
+                self.assertEqual(restored.smoothing_frequency_spins[2].value(), 1000.0)
+            finally:
+                restored.close()
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

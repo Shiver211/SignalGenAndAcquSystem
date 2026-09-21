@@ -164,13 +164,47 @@ def smooth_binomial_5(samples: np.ndarray) -> np.ndarray:
     if values.size < 5:
         return values.copy()
     padded = np.pad(values, (2, 2), mode="edge")
-    windows = np.stack(
-        (padded[:-4], padded[1:-3], padded[2:-2], padded[3:-1], padded[4:]),
-    )
-    return np.sum(
-        windows * np.array([1.0, 4.0, 6.0, 4.0, 1.0])[:, None],
-        axis=0,
-    ) / 16.0
+    return np.convolve(padded, np.array([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0, mode="valid")
+
+
+def smooth_continuous_display(samples: np.ndarray, sample_rate_hz: float) -> np.ndarray:
+    """约 500 kHz 起，对连续波形做保峰的局部二次拟合，仅返回显示副本。
+
+    两路独立估频并使用相同规则：窗口约为周期的 30%，限制为 5..21 点。
+    对称拟合保留峰谷曲率及相位；按当前帧采样率检查正弦增益，幅度衰减
+    超过 0.5% 时旁路。低频、周期不明、明显跳变和窄脉冲保留原样。
+    """
+    values = np.asarray(samples, dtype=np.float64)
+    if values.size < 16:
+        return values.copy()
+    span = float(np.ptp(values))
+    if span == 0:
+        return values.copy()
+    # 五点平均仅辅助估频，避免零点抖动重复计数，不作为最终显示滤波。
+    frequency = zero_crossing_frequency(smooth_binomial_5(values), sample_rate_hz)
+    # 500 kHz 入口留 1% 估频余量，避免同一信号在临界值两侧反复切换。
+    if frequency < 495_000:
+        return values.copy()
+    period = sample_rate_hz / frequency
+    # 正弦本身的相邻差随频率增加，不能固定以满幅 10% 拒绝高频正弦。
+    step_limit = span * max(0.1, 2 * np.sin(np.pi / period))
+    if np.max(np.abs(np.diff(values))) > step_limit:
+        return values.copy()
+    window = min(21, max(5, int(period * 0.3) | 1))
+    if values.size < window:
+        return values.copy()
+    half = window // 2
+    offsets = np.arange(-half, half + 1, dtype=np.float64)
+    # Savitzky–Golay 二次拟合：中心值是常数项，无需新增 SciPy 依赖。
+    basis = np.column_stack((np.ones(window), offsets, offsets ** 2))
+    weights = np.linalg.pinv(basis)[0]
+    gain = float(weights @ np.cos(2 * np.pi * offsets / period))
+    if abs(gain - 1.0) > 0.005:
+        return values.copy()
+    result = values.copy()
+    # 首尾没有完整邻域，保留原值；内部窗口对称，不改动时间坐标。
+    result[half:-half] = np.convolve(values, weights, mode="valid")
+    return result
 
 
 @dataclass(frozen=True)

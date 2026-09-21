@@ -19,7 +19,7 @@ from host.comm.data_protocol import (
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
 from host.core.waveform import (
     clean_square_waveform, codes_to_voltage, fft_spectrum,
-    idealize_square_display, refine_trigger_position,
+    idealize_square_display, refine_trigger_position, smooth_continuous_display,
 )
 
 
@@ -279,8 +279,8 @@ class PlotWidget(QtWidgets.QWidget):
         RAW/DECIMATED 使用 UDP 头中的 ``trigger_index`` 作为时间零点；
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
         已配置触发参数的 1:1 连续帧会细化首点时间；回放可关闭此校正。
-        可识别的方波自动整形；其他包络保留 Min/Max 范围。
-        长记录先按完整采样去过冲，再按桶内极值抽点。
+        可识别的方波自动整形；连续波形适度平滑，包络保留 Min/Max 范围。
+        长记录先在等间隔样点上处理显示副本，再按桶内极值抽点。
         """
         if not align_trigger:
             self._frame_trigger_alignment = None
@@ -326,11 +326,9 @@ class PlotWidget(QtWidgets.QWidget):
                 a = a[:visible]
                 b = b[:visible]
         cleaned_a = clean_square_waveform(a)
-        if cleaned_a is not None:
-            a = cleaned_a
+        a = cleaned_a if cleaned_a is not None else smooth_continuous_display(a, sample_rate)
         cleaned_b = clean_square_waveform(b)
-        if cleaned_b is not None:
-            b = cleaned_b
+        b = cleaned_b if cleaned_b is not None else smooth_continuous_display(b, sample_rate)
         indices, display_a, display_b = self._reduce_raw_for_display(
             a, b, max_points,
         )
@@ -383,7 +381,8 @@ class PlotWidget(QtWidgets.QWidget):
                 minimum.clear()
                 maximum.clear()
             else:
-                center = (lo + hi) / 2.0
+                # 仅平滑中心线；可见的 Min/Max 仍来自 FPGA 的原始包络。
+                center = smooth_continuous_display((lo + hi) / 2.0, sample_rate)
                 curve.setData(
                     x, self._to_divisions(self._codes_to_volts(center, channel), channel),
                 )

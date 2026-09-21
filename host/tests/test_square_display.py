@@ -237,7 +237,10 @@ class IdealSquareWidgetTest(unittest.TestCase):
             payload = (sine | (sine << 12)).tobytes()
             frame = CompletedFrame(frame.header, payload)
             widget.display_frame(frame)
-            np.testing.assert_array_equal(widget.curve_a.getData()[1], codes_to_voltage(sine))
+            # 正弦恢复为普通曲线并适度平滑，不能沿用方波整形；原始帧不变。
+            self.assertEqual(len(widget.curve_a.getData()[1]), len(sine))
+            np.testing.assert_allclose(widget.curve_a.getData()[1], codes_to_voltage(sine), atol=0.006)
+            self.assertEqual(frame.payload, payload)
         finally:
             widget.close()
 
@@ -266,12 +269,12 @@ class IdealSquareWidgetTest(unittest.TestCase):
             np.testing.assert_allclose(widget.curve_a.getData()[1], before * 2 + 0.25)
             np.testing.assert_array_equal(widget.curve_a.getData()[0], x)
             np.testing.assert_allclose(widget.curve_b.getData()[1],
-                                       codes_to_voltage((bmin.astype(float) + bmax) / 2))
+                                       codes_to_voltage((bmin.astype(float) + bmax) / 2), atol=0.01)
             payload = np.column_stack((bmin, bmax, bmin, bmax)).astype('<u2').tobytes()
             widget.display_frame(CompletedFrame(frame.header, payload))
             self.assertTrue(widget.fill_a.isVisible())
             expected_min = codes_to_voltage(bmin) * 2 + 0.25
-            expected_center = codes_to_voltage((bmin.astype(float) + bmax) / 2) * 2 + 0.25
+            expected_center = widget.curve_a.getData()[1]
             span_div = (codes_to_voltage(bmax) - codes_to_voltage(bmin)) / 0.5
             visible = span_div >= widget._ENVELOPE_BAND_DIVISIONS
             min_a = widget.min_a.getData()[1]

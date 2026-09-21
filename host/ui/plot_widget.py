@@ -36,6 +36,7 @@ class PlotWidget(QtWidgets.QWidget):
     VERTICAL_DIVISIONS = 8
     _HALF_HORIZONTAL_DIVISIONS = HORIZONTAL_DIVISIONS / 2
     _HALF_VERTICAL_DIVISIONS = VERTICAL_DIVISIONS / 2
+    _ENVELOPE_BAND_DIVISIONS = 0.1
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -351,12 +352,35 @@ class PlotWidget(QtWidgets.QWidget):
                 minimum.clear()
                 maximum.clear()
             else:
-                # 非方波或平台已不可分辨时继续绘制真实包络，不能凭空重建。
-                curve.setData(x, self._to_divisions(self._codes_to_volts((lo + hi) / 2, channel), channel))
-                minimum.setData(x, self._to_divisions(self._codes_to_volts(lo, channel), channel))
-                maximum.setData(x, self._to_divisions(self._codes_to_volts(hi, channel), channel))
-                if np.any(lo != hi):
+                center = (lo + hi) / 2.0
+                curve.setData(
+                    x, self._to_divisions(self._codes_to_volts(center, channel), channel),
+                )
+                span_div = (
+                    np.abs(
+                        self._codes_to_volts(hi, channel)
+                        - self._codes_to_volts(lo, channel)
+                    )
+                    / self._channel_settings[channel]["volts_per_div"]
+                )
+                visible_band = span_div >= self._ENVELOPE_BAND_DIVISIONS
+                if np.any(visible_band):
+                    display_lo = np.where(visible_band, lo, center)
+                    display_hi = np.where(visible_band, hi, center)
+                    minimum.setData(
+                        x, self._to_divisions(
+                            self._codes_to_volts(display_lo, channel), channel,
+                        ),
+                    )
+                    maximum.setData(
+                        x, self._to_divisions(
+                            self._codes_to_volts(display_hi, channel), channel,
+                        ),
+                    )
                     self._envelope_channels.add(channel)
+                else:
+                    minimum.clear()
+                    maximum.clear()
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 

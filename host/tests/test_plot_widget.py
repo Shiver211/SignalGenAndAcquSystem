@@ -162,8 +162,7 @@ class PlotWidgetTest(unittest.TestCase):
             widget.display_frame(frame)
             y = widget.curve_a.getData()[1]
             self.assertGreater(float(y[2]), float(y[1]))
-            self.assertGreater(float(widget.max_a.getData()[1][2]),
-                               float(widget.max_a.getData()[1][1]))
+            self.assertFalse(widget.max_a.isVisible())
             self.assertEqual(len(widget.curve_a.getData()[0]), len(y))
         finally:
             widget.close()
@@ -239,6 +238,60 @@ class PlotWidgetTest(unittest.TestCase):
             self.assertTrue(widget.fill_a.isVisible())
             self.assertFalse(widget.fill_b.isVisible())
             self.assertTrue(widget.curve_a.isVisible())
+        finally:
+            widget.close()
+
+    def test_one_lsb_envelope_noise_draws_a_single_centerline(self) -> None:
+        widget = self.make_widget()
+        try:
+            # CH1 桶内 min=max；CH2 只有 ±1 LSB。这点起伏细于 0.05 格，
+            # 必须保持单线，不能把 CH2 画成 Min/Max 套管。
+            payload = b"".join(
+                struct.pack("<HHHH", 0x800, 0x800, 0x800, 0x801)
+                for _ in range(32)
+            )
+            frame = CompletedFrame(
+                PacketHeader(1, 2, 8, 32, 1000, 0, 3, SampleFormat.ENVELOPE64,
+                             0, 0, len(payload), 0), payload,
+            )
+            widget.set_timebase(0.01)
+            widget.set_volts_per_div(1, 0.5)
+            widget.set_volts_per_div(2, 0.5)
+            widget.display_frame(frame)
+            self.assertFalse(widget.fill_a.isVisible())
+            self.assertFalse(widget.min_a.isVisible())
+            self.assertFalse(widget.fill_b.isVisible())
+            self.assertFalse(widget.min_b.isVisible())
+            self.assertTrue(widget.curve_a.isVisible())
+            self.assertTrue(widget.curve_b.isVisible())
+            np.testing.assert_allclose(
+                widget.curve_b.getData()[1],
+                codes_to_voltage(np.full(32, 2048.5)) / 0.5,
+            )
+        finally:
+            widget.close()
+
+    def test_isolated_envelope_glitch_keeps_a_local_band(self) -> None:
+        widget = self.make_widget()
+        try:
+            records = [(0x800, 0x801, 0x800, 0x801)] * 16
+            records[8] = (0x800, 0x801, 0x600, 0xA00)
+            payload = b"".join(struct.pack("<HHHH", *record) for record in records)
+            frame = CompletedFrame(
+                PacketHeader(1, 2, 9, 16, 1000, 0, 3, SampleFormat.ENVELOPE64,
+                             0, 0, len(payload), 0), payload,
+            )
+            widget.set_volts_per_div(2, 0.5)
+            widget.display_frame(frame)
+            self.assertFalse(widget.fill_a.isVisible())
+            self.assertTrue(widget.fill_b.isVisible())
+            min_b = widget.min_b.getData()[1]
+            max_b = widget.max_b.getData()[1]
+            center_b = widget.curve_b.getData()[1]
+            np.testing.assert_allclose(min_b[:8], center_b[:8])
+            np.testing.assert_allclose(max_b[:8], center_b[:8])
+            self.assertLess(float(min_b[8]), float(center_b[8]) - 0.2)
+            self.assertGreater(float(max_b[8]), float(center_b[8]) + 0.2)
         finally:
             widget.close()
 

@@ -194,6 +194,12 @@ class IdealSquareWidgetTest(unittest.TestCase):
             payload = np.column_stack((bmin, bmax, bmin, bmax)).astype('<u2').tobytes()
             widget.display_frame(CompletedFrame(frame.header, payload))
             self.assertTrue(widget.fill_a.isVisible())
-            np.testing.assert_allclose(widget.min_a.getData()[1], codes_to_voltage(bmin) * 2 + 0.25)
+            expected_min = codes_to_voltage(bmin) * 2 + 0.25
+            expected_center = codes_to_voltage((bmin.astype(float) + bmax) / 2) * 2 + 0.25
+            span_div = (codes_to_voltage(bmax) - codes_to_voltage(bmin)) / 0.5
+            visible = span_div >= widget._ENVELOPE_BAND_DIVISIONS
+            min_a = widget.min_a.getData()[1]
+            np.testing.assert_allclose(min_a[visible], expected_min[visible])
+            np.testing.assert_allclose(min_a[~visible], expected_center[~visible])
         finally:
             widget.close()

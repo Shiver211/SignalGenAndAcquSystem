@@ -157,8 +157,11 @@ def _prepare_square_waveform(
     high = float(np.median(center[high_samples]))
     span = high - low
     residual = np.abs(center - np.where(state, high, low))
-    # 平台占主要部分才认为是方波，避免把正弦、三角和缓慢斜坡整形成方波。
-    if np.mean(residual[narrow] <= span * 0.08) < 0.8:
+    # 平台须占主要部分。只忽略横跨高低电平的边沿桶；斜坡上的部分
+    # 幅度桶必须计入，否则密集正弦的峰谷窄桶会被误判为方波平台。
+    edge = (hi - lo) >= span * 0.5
+    plateau = residual[~edge]
+    if plateau.size == 0 or np.mean(plateau <= span * 0.08) < 0.8:
         return None
 
     boundaries = np.r_[0, np.flatnonzero(state[1:] != state[:-1]) + 1, len(lo)]

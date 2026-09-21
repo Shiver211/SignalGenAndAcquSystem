@@ -67,6 +67,29 @@ class IdealSquareTest(unittest.TestCase):
             self.assertIsNone(idealize_square_display(time, values))
         self.assertIsNone(idealize_square_display(time, np.full(650, -1.2), np.full(650, 1.2)))
 
+    def test_dense_sine_envelope_is_not_squared(self) -> None:
+        # 窗口内周期很多时，包络在峰谷呈窄桶、斜坡呈宽桶；不能把斜坡
+        # 当成边沿丢掉，否则峰谷会被认成方波平台。
+        for timebase, frequency in (
+            (5e-6, 5_000_000),
+            (10e-6, 1_000_000),
+            (20e-6, 500_000),
+            (20e-6, 800_000),
+            (50e-6, 200_000),
+            (100e-6, 100_000),
+            (1e-3, 10_000),
+        ):
+            with self.subTest(timebase=timebase, frequency=frequency):
+                count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+                source = np.sin(2 * np.pi * np.arange(count) * frequency / ADC_SAMPLE_RATE_HZ)
+                codes = np.rint((source + 5) / 10 * 4095).astype(np.uint16)
+                bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+                offsets = np.arange(0, count, bucket)
+                lo = np.minimum.reduceat(codes, offsets).astype(np.float64)
+                hi = np.maximum.reduceat(codes, offsets).astype(np.float64)
+                time = np.arange(len(lo)) / max(ADC_SAMPLE_RATE_HZ // bucket, 1)
+                self.assertIsNone(idealize_square_display(time, lo, hi))
+
     def test_period_and_duty_cycle_are_not_replaced_by_fifty_percent(self) -> None:
         time = np.arange(1300) / ADC_SAMPLE_RATE_HZ
         for duty in (0.2, 0.35, 0.7, 0.8):
@@ -139,6 +162,31 @@ class IdealSquareWidgetTest(unittest.TestCase):
                 self.assertFalse(maximum.isVisible())
                 self.assertFalse(fill.isVisible())
             self.assertIs(widget._last_frame, frame)
+        finally:
+            widget.close()
+
+    def test_dense_sine_envelope_keeps_min_max_band(self) -> None:
+        timebase, frequency = 10e-6, 1_000_000
+        count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+        source = np.sin(2 * np.pi * np.arange(count) * frequency / ADC_SAMPLE_RATE_HZ)
+        codes = np.rint((source + 5) / 10 * 4095).astype(np.uint16)
+        bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+        offsets = np.arange(0, count, bucket)
+        lo, hi = np.minimum.reduceat(codes, offsets), np.maximum.reduceat(codes, offsets)
+        payload = np.column_stack((lo, hi, lo, hi)).astype("<u2").tobytes()
+        frame = CompletedFrame(
+            PacketHeader(1, 2, 1, len(lo), ADC_SAMPLE_RATE_HZ // bucket, 0, 3,
+                         SampleFormat.ENVELOPE64, 0, 0, len(payload), 0), payload,
+        )
+        widget = PlotWidget()
+        try:
+            widget.set_timebase(timebase)
+            widget.display_frame(frame)
+            self.assertTrue(widget.fill_a.isVisible())
+            self.assertTrue(widget.fill_b.isVisible())
+            x, y = widget.curve_a.getData()
+            jumps = np.abs(np.diff(y)) > 0.5
+            self.assertFalse(np.any(np.diff(x)[jumps] == 0))
         finally:
             widget.close()
 

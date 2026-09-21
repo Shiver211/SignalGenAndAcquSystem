@@ -83,6 +83,23 @@ class SquareMeasurementTest(unittest.TestCase):
             self.assertEqual(result.maximum_v, values.max())
             self.assertEqual(result.mean_v, values.mean())
 
+    def test_dense_sine_envelope_amplitude_is_not_squared(self):
+        for timebase, frequency in (
+            (10e-6, 1_000_000),
+            (20e-6, 500_000),
+            (50e-6, 200_000),
+            (1e-3, 10_000),
+        ):
+            with self.subTest(timebase=timebase, frequency=frequency):
+                count = int(np.ceil(ADC_SAMPLE_RATE_HZ * timebase * 10))
+                values = np.sin(2 * np.pi * np.arange(count) * frequency / ADC_SAMPLE_RATE_HZ)
+                codes = to_codes(values)
+                bucket = int(np.ceil(count / MAX_ENVELOPE_POINTS))
+                offsets = np.arange(0, count, bucket)
+                lo = np.minimum.reduceat(codes, offsets).astype(np.float64)
+                hi = np.maximum.reduceat(codes, offsets).astype(np.float64)
+                self.assertIsNone(clean_square_waveform(lo, hi))
+
     def test_mean_uses_samples_without_extra_drawing_endpoints(self):
         values = np.where(np.arange(1300) % 100 < 20, 1.0, -1.0)
         values[110] = 1.8

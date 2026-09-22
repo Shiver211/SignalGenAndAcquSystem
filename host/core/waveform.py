@@ -12,6 +12,15 @@ ADC_FULL_SCALE_VOLTS = 10.0
 ADC_MAX_CODE = 4095.0
 ADC_CAL_GAIN_MIN = 0.5
 ADC_CAL_GAIN_MAX = 1.5
+# 本板 CH1 对称波形中心稳定在 2021.5，比 0 V 码 2047.5 低 26 LSB。
+CH1_DC_OFFSET_CODES = 26.0
+
+
+def fixed_dc_offset_v(channel: int, gain: float = 1.0) -> float:
+    """通道固定直流补偿。增益缩放后仍把同一码值偏移对齐到 0 V。"""
+    if channel != 1:
+        return 0.0
+    return CH1_DC_OFFSET_CODES / ADC_MAX_CODE * ADC_FULL_SCALE_VOLTS * gain
 
 
 @dataclass(frozen=True)

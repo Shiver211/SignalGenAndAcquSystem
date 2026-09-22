@@ -27,8 +27,8 @@ from host.config import (
     PC_IP, UART_BAUD, UDP_PORT,
 )
 from host.core.waveform import (
-    MeasurementDisplayFilter, code_to_voltage, format_frequency_hz, format_voltage,
-    gain_from_known_vpp, square_plateau_stats, vpp_from_code_span,
+    MeasurementDisplayFilter, code_to_voltage, fixed_dc_offset_v, format_frequency_hz,
+    format_voltage, gain_from_known_vpp, square_plateau_stats, vpp_from_code_span,
     zero_crossing_frequency,
 )
 from host.db.sqlite_store import SqliteStore
@@ -1031,7 +1031,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     label.setText("未启用")
                 continue
             gain = self._adc_gain[channel]
-            offset = self._adc_offset[channel]
+            offset = self._adc_offset[channel] + fixed_dc_offset_v(channel, gain)
             labels[0].setText(format_voltage(code_to_voltage(min_code, gain=gain, offset_v=offset)))
             labels[1].setText(format_voltage(code_to_voltage(max_code, gain=gain, offset_v=offset)))
             labels[2].setText(format_voltage(

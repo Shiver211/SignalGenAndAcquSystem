@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtCore, QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
-from host.core.waveform import format_voltage, vpp_from_code_span
+from host.core.waveform import code_to_voltage, fixed_dc_offset_v, format_voltage, vpp_from_code_span
 from host.tests.window_helpers import create_window
 
 
@@ -64,7 +64,12 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
             window._on_frame(measurement)
             self.assertEqual(
                 [label.text() for label in window.measurement_labels[:4]],
-                ["-5.000 V", "-5.000 V", "0.000 V", "无效"],
+                [
+                    format_voltage(code_to_voltage(0, offset_v=fixed_dc_offset_v(1))),
+                    format_voltage(code_to_voltage(0, offset_v=fixed_dc_offset_v(1))),
+                    "0.000 V",
+                    "无效",
+                ],
             )
             self.assertEqual([label.text() for label in window.measurement_labels[4:]],
                              ["未启用"] * 4)
@@ -138,6 +143,31 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
             self.assertFalse(window.calibrate_buttons[2].isEnabled())
             self.assertFalse(window.cal_vpp_spins[2].isEnabled())
             self.assertFalse(window.reset_cal_buttons[2].isEnabled())
+            window.close()
+            self.app.processEvents()
+
+    def test_ch1_fixed_dc_offset_shifts_readings_not_vpp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "fixed-dc.db")
+            window._on_frame(frame(SampleFormat.MEASUREMENT_V1, dual_measurement_payload()))
+            offset = fixed_dc_offset_v(1)
+            self.assertEqual(
+                window.measurement_labels[0].text(),
+                format_voltage(code_to_voltage(1600, offset_v=offset)),
+            )
+            self.assertEqual(
+                window.measurement_labels[1].text(),
+                format_voltage(code_to_voltage(2444, offset_v=offset)),
+            )
+            self.assertEqual(
+                window.measurement_labels[2].text(),
+                format_voltage(vpp_from_code_span(844), peak_to_peak=True),
+            )
+            self.assertEqual(
+                window.measurement_labels[4].text(),
+                format_voltage(code_to_voltage(1626)),
+            )
+            self.assertFalse(hasattr(window, "ch1_dc_offset_spin"))
             window.close()
             self.app.processEvents()
 

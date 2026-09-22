@@ -18,7 +18,7 @@ from host.comm.data_protocol import (
 )
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum,
+    codes_to_voltage, fft_spectrum, fixed_dc_offset_v,
     idealize_square_display, refine_trigger_position, smooth_continuous_display,
 )
 
@@ -194,10 +194,11 @@ class PlotWidget(QtWidgets.QWidget):
         self._redraw_last_frame()
 
     def _codes_to_volts(self, codes: np.ndarray, channel: int) -> np.ndarray:
+        gain = self._adc_gain[channel]
         return codes_to_voltage(
             codes,
-            gain=self._adc_gain[channel],
-            offset_v=self._adc_offset[channel],
+            gain=gain,
+            offset_v=self._adc_offset[channel] + fixed_dc_offset_v(channel, gain),
         )
 
     def set_smoothing_start_frequency(self, channel: int, frequency_hz: float) -> None:

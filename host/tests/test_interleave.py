@@ -99,12 +99,17 @@ class InterleaveTest(unittest.TestCase):
                 self.assertEqual(w._adc_gain[1], 0.5)
                 self.assertEqual(w._adc_offset[1], 1.0)
                 from host.comm.data_protocol import decode_measurement_v1
-                from host.core.waveform import code_to_voltage, format_voltage, vpp_from_code_span
+                from host.core.waveform import (
+                    code_to_voltage, fixed_dc_offset_v, format_voltage, vpp_from_code_span,
+                )
                 from host.tests.test_main_window_frame_selection import dual_measurement_payload
                 measurement = decode_measurement_v1(dual_measurement_payload())
                 w._render_measurement(measurement, 3)
                 self.assertEqual(w.measurement_labels[0].text(), format_voltage(
-                    code_to_voltage(measurement.min_a, gain=0.5, offset_v=1.0)))
+                    code_to_voltage(
+                        measurement.min_a, gain=0.5,
+                        offset_v=1.0 + fixed_dc_offset_v(1, 0.5),
+                    )))
                 self.assertEqual(w.measurement_labels[2].text(), format_voltage(
                     vpp_from_code_span(measurement.vpp_a, gain=0.5), peak_to_peak=True))
                 w.serial_link.send_command.assert_not_called()

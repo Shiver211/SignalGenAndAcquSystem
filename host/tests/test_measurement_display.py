@@ -29,13 +29,28 @@ class MeasurementDisplayFilterTest(unittest.TestCase):
 
     def test_small_chatter_does_not_move_the_reading(self) -> None:
         self.filt.update_channel(1, 1600, 2444, 10_000, frequency_valid=True, active=True)
-        for offset in (1, -1, 2, -2, 1, 0, -1, 2):
+        for index, offset in enumerate((1, -1, 2, -2, 1, 0, -1, 2)):
             minimum, maximum, vpp, frequency, valid = self.filt.update_channel(
-                1, 1600 + offset, 2444 - offset, 10_000 + (offset % 2),
+                1, 1600 + offset, 2444 - offset, 10_000 + (1 if index % 2 == 0 else -1),
                 frequency_valid=True, active=True,
             )
             self.assertEqual((minimum, maximum, vpp, frequency, valid),
                              (1600, 2444, 844, 10_000.0, True))
+
+    def test_one_hertz_change_appears_when_repeated(self) -> None:
+        for start in (50.0, 10_000.0, 1_000_000.0):
+            with self.subTest(start=start):
+                self.filt.reset()
+                self.filt.update_channel(1, 1600, 2444, start, frequency_valid=True, active=True)
+                once = self.filt.update_channel(
+                    1, 1600, 2444, start + 1, frequency_valid=True, active=True,
+                )
+                self.assertEqual(once[3], start)
+                twice = self.filt.update_channel(
+                    1, 1600, 2444, start + 1, frequency_valid=True, active=True,
+                )
+                self.assertEqual(twice[3], start + 1.0)
+                self.assertTrue(twice[4])
 
     def test_step_updates_on_the_same_reading(self) -> None:
         self.filt.update_channel(1, 1600, 2444, 10_000, frequency_valid=True, active=True)
@@ -86,9 +101,10 @@ class MeasurementDisplayWindowTest(unittest.TestCase):
             self.assertEqual(window.measurement_labels[2].text(),
                              format_voltage((2444 - 1600) / 4095 * 10, peak_to_peak=True))
             self.assertEqual(window.measurement_labels[3].text(), format_frequency_hz(10_000))
-            for offset in (1, -1, 2, -1):
+            for index, offset in enumerate((1, -1, 2, -1)):
                 window._on_frame(_measurement_frame(
-                    1600 + offset, 2444 - offset, 1626, 2468, 10_000 + offset, 12_000,
+                    1600 + offset, 2444 - offset, 1626, 2468,
+                    10_000 + (1 if index % 2 == 0 else -1), 12_000,
                 ))
             self.assertEqual(window.measurement_labels[0].text(),
                              format_voltage(1600 / 4095 * 10 - 5))

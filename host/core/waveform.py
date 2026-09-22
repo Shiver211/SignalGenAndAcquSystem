@@ -481,8 +481,8 @@ def measure_waveform(samples_v: np.ndarray, sample_rate_hz: float) -> WaveformMe
 class MeasurementDisplayFilter:
     """稳定界面上的幅度和频率，不改动保存或校准用的原始测量。
 
-    ±1 个码和 ±1 Hz 用三点中值按住，避免末位来回跳。变化一超出该噪声带，
-    当前这一帧就改写显示，不再等下一次测量确认。
+    幅度的 ±1 个码用三点中值按住。频率按 1 Hz 显示：单次 ±1 Hz 跳动不改
+    读数，同一个新频率再出现一次就更新；2 Hz 及以上的变化在当前帧跟上。
     """
 
     WINDOW = 3
@@ -518,15 +518,7 @@ class MeasurementDisplayFilter:
         if max_code < min_code:
             min_code, max_code = max_code, min_code
         if frequency_valid:
-            frequency = float(frequency_hz)
-            shown_freq = self._shown.get((channel, "freq"))
-            reference = frequency if shown_freq is None else max(frequency, shown_freq)
-            if reference < 1000.0:
-                freq_hold = 1.0
-            else:
-                freq_hold = max(2.0, reference * 0.00008)
-            freq_snap = max(freq_hold * 2.0, reference * 0.0002)
-            frequency_out = self._push((channel, "freq"), frequency, freq_hold, freq_snap)
+            frequency_out = self._push_frequency(channel, float(frequency_hz))
             return min_code, max_code, max_code - min_code, frequency_out, True
         return min_code, max_code, max_code - min_code, 0.0, False
 
@@ -549,4 +541,21 @@ class MeasurementDisplayFilter:
         if abs(estimate - shown) > hold:
             self._shown[key] = estimate
             return estimate
+        return shown
+
+    def _push_frequency(self, channel: int, value: float) -> float:
+        key = (channel, "freq")
+        shown = self._shown.get(key)
+        history = self._history.setdefault(key, deque(maxlen=self.WINDOW))
+        reading = float(round(value))
+        if shown is None or abs(reading - shown) >= 2.0:
+            history.clear()
+            history.append(reading)
+            self._shown[key] = reading
+            return reading
+        history.append(reading)
+        # 相差 1 Hz 时，下一次仍是这个频率才改显示，避免末位来回跳。
+        if len(history) >= 2 and history[-1] == history[-2] and history[-1] != shown:
+            self._shown[key] = history[-1]
+            return history[-1]
         return shown

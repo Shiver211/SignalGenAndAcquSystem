@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -466,3 +467,77 @@ def measure_waveform(samples_v: np.ndarray, sample_rate_hz: float) -> WaveformMe
         vpp_v=maximum - minimum,
         frequency_hz=zero_crossing_frequency(values, sample_rate_hz),
     )
+
+
+class MeasurementDisplayFilter:
+    """稳定界面上的幅度和频率，不改动保存或校准用的原始测量。
+
+    ±1 个码和 ±1 Hz 用三点中值按住，避免末位来回跳。变化一超出该噪声带，
+    当前这一帧就改写显示，不再等下一次测量确认。
+    """
+
+    WINDOW = 3
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._history: dict[tuple[int, str], deque[float]] = {}
+        self._shown: dict[tuple[int, str], float] = {}
+
+    def update_channel(
+        self,
+        channel: int,
+        minimum: int,
+        maximum: int,
+        frequency_hz: float,
+        *,
+        frequency_valid: bool,
+        active: bool,
+    ) -> tuple[int, int, int, float, bool]:
+        """返回用于显示的 min、max、vpp、频率和频率是否有效。"""
+        if channel not in (1, 2):
+            raise ValueError("通道必须为 1 或 2")
+        if not active:
+            self._drop_channel(channel)
+            return 0, 0, 0, 0.0, False
+
+        minimum_out = self._push((channel, "min"), float(minimum), 1.5, 6.0)
+        maximum_out = self._push((channel, "max"), float(maximum), 1.5, 6.0)
+        min_code = int(round(minimum_out))
+        max_code = int(round(maximum_out))
+        if max_code < min_code:
+            min_code, max_code = max_code, min_code
+        if frequency_valid:
+            frequency = float(frequency_hz)
+            shown_freq = self._shown.get((channel, "freq"))
+            reference = frequency if shown_freq is None else max(frequency, shown_freq)
+            if reference < 1000.0:
+                freq_hold = 1.0
+            else:
+                freq_hold = max(2.0, reference * 0.00008)
+            freq_snap = max(freq_hold * 2.0, reference * 0.0002)
+            frequency_out = self._push((channel, "freq"), frequency, freq_hold, freq_snap)
+            return min_code, max_code, max_code - min_code, frequency_out, True
+        return min_code, max_code, max_code - min_code, 0.0, False
+
+    def _drop_channel(self, channel: int) -> None:
+        for kind in ("min", "max", "freq"):
+            key = (channel, kind)
+            self._history.pop(key, None)
+            self._shown.pop(key, None)
+
+    def _push(self, key: tuple[int, str], value: float, hold: float, snap: float) -> float:
+        shown = self._shown.get(key)
+        history = self._history.setdefault(key, deque(maxlen=self.WINDOW))
+        if shown is None or abs(value - shown) > snap:
+            history.clear()
+            history.append(value)
+            self._shown[key] = value
+            return value
+        history.append(value)
+        estimate = float(np.median(list(history)))
+        if abs(estimate - shown) > hold:
+            self._shown[key] = estimate
+            return estimate
+        return shown

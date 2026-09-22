@@ -27,8 +27,9 @@ from host.config import (
     PC_IP, UART_BAUD, UDP_PORT,
 )
 from host.core.waveform import (
-    code_to_voltage, format_frequency_hz, format_voltage, gain_from_known_vpp,
-    square_plateau_stats, vpp_from_code_span, zero_crossing_frequency,
+    MeasurementDisplayFilter, code_to_voltage, format_frequency_hz, format_voltage,
+    gain_from_known_vpp, square_plateau_stats, vpp_from_code_span,
+    zero_crossing_frequency,
 )
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, DEFAULT_SMOOTHING_START_HZ, PlotWidget
@@ -71,6 +72,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_raw_frame_id = 0
         self._last_measurement: Measurement | None = None
         self._last_measurement_mask = 0
+        self._displayed_measurement: Measurement | None = None
+        self._measurement_filter = MeasurementDisplayFilter()
         self._hardware_measurement: Measurement | None = None
         self._hardware_measurement_mask = 0
         self._square_amplitude: dict[str, int] = {}
@@ -866,6 +869,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._square_amplitude = {}
         self._square_amplitude_mask = 0
         self._square_amplitude_time = 0.0
+        self._displayed_measurement = None
+        self._measurement_filter.reset()
 
     def _update_square_amplitude(self, frame: CompletedFrame) -> None:
         # 每帧重建。显示无法整形时仍可用平台电平；非方波不能沿用上一帧。
@@ -899,9 +904,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fresh = monotonic() - self._square_amplitude_time <= max(0.5, 3.0 / max(1.0, self.refresh_spin.value()))
         if mask == self._square_amplitude_mask and fresh:
             measurement = replace(measurement, **self._square_amplitude)
-        self._last_measurement = measurement
-        self._last_measurement_mask = mask
-        self._render_measurement(measurement, mask)
+        self._publish_measurement(measurement, mask)
 
     def _accept_manual_raw(self, frame: CompletedFrame) -> None:
         self.current_frame = frame
@@ -964,9 +967,33 @@ class MainWindow(QtWidgets.QMainWindow):
             period_valid_a=valid_a, period_valid_b=valid_b,
             calculation_overrun=False,
         )
+        self._measurement_filter.reset()
+        self._publish_measurement(measurement, mask)
+
+    def _publish_measurement(self, measurement: Measurement, mask: int) -> None:
+        """保存原始测量，界面只显示稳定后的幅度和频率。"""
         self._last_measurement = measurement
         self._last_measurement_mask = mask
-        self._render_measurement(measurement, mask)
+        self._displayed_measurement = self._stabilize_for_display(measurement, mask)
+        self._render_measurement(self._displayed_measurement, mask)
+
+    def _stabilize_for_display(self, measurement: Measurement, mask: int) -> Measurement:
+        updates: dict[str, int | float | bool] = {}
+        for channel, suffix in ((1, "a"), (2, "b")):
+            minimum, maximum, vpp, frequency, valid = self._measurement_filter.update_channel(
+                channel,
+                getattr(measurement, f"min_{suffix}"),
+                getattr(measurement, f"max_{suffix}"),
+                float(getattr(measurement, f"frequency_hz_{suffix}")),
+                frequency_valid=bool(getattr(measurement, f"period_valid_{suffix}")),
+                active=bool(mask & channel),
+            )
+            updates[f"min_{suffix}"] = minimum
+            updates[f"max_{suffix}"] = maximum
+            updates[f"vpp_{suffix}"] = vpp
+            updates[f"frequency_hz_{suffix}"] = int(round(frequency))
+            updates[f"period_valid_{suffix}"] = valid
+        return replace(measurement, **updates)
 
     def _load_adc_calibration(self) -> None:
         for channel in (1, 2):
@@ -1036,7 +1063,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adc_gain[channel] = gain
         self._save_adc_calibration()
         self._apply_adc_calibration()
-        self._render_measurement(measurement, mask)
+        self._render_measurement(self._displayed_measurement or measurement, mask)
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
         self.statusBar().showMessage(
@@ -1050,8 +1077,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adc_offset[channel] = 0.0
         self._save_adc_calibration()
         self._apply_adc_calibration()
-        if self._last_measurement is not None:
-            self._render_measurement(self._last_measurement, self._last_measurement_mask)
+        if self._displayed_measurement is not None:
+            self._render_measurement(self._displayed_measurement, self._last_measurement_mask)
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
         self.statusBar().showMessage(f"CH{channel} 已恢复标称 ±5V 换算", 3000)

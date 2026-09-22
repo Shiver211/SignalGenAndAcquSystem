@@ -124,14 +124,38 @@ def _sine_trigger_position(values: np.ndarray) -> float | None:
     return float(position) if -1.5 <= position <= 0.5 else None
 
 
+def _square_trigger_position(values: np.ndarray) -> float | None:
+    """用重复边沿反推帧首附近的触发交点，输入已按触发电平和方向归一化。"""
+    levels = _square_levels(values)
+    if levels is None or not levels.low < 0 < levels.high:
+        return None
+    edges = np.flatnonzero((values[1:] >= 0) != (values[:-1] >= 0)) + 1
+    # 首点已越过触发电平：至少还需下降、上升、下降三个边沿来区分周期与脉宽。
+    if len(edges) < 3:
+        return None
+    crossings = edges - 1 - values[edges - 1] / (values[edges] - values[edges - 1])
+    rising = values[edges] >= 0
+    cycles = (np.arange(len(edges)) + 1) // 2
+    # 上升沿 t=起点+k*周期；下降沿 t=起点+k*周期+高电平宽度。
+    # 脉宽独立拟合，不假定 50% 占空比；最终仅把公共起点交给显示层。
+    basis = np.column_stack((np.ones(len(edges)), cycles, ~rising))
+    coefficients = np.linalg.lstsq(basis, crossings, rcond=None)[0]
+    position, period, width = coefficients
+    # 非周期毛刺、离触发点过远的自动帧，不能据后续边沿重新锁定相位。
+    if (not -1.5 <= position <= 0.5 or not 0 < width < period or
+            np.max(np.abs(crossings - basis @ coefficients)) > 0.25):
+        return None
+    return float(position)
+
+
 def refine_trigger_position(
     samples: np.ndarray, level: float, *, falling: bool = False,
 ) -> float | None:
     """细化连续帧起点的触发位置，返回相对首点的浮点样本下标。
 
     输入须为触发通道未压缩的 ADC 码，level 是计入迟滞后的实际触发电平。
-    高频正弦按相位求交点，避免把弯曲的前段误当直线；其他波形尝试局部
-    斜率拟合。两种估计都不可靠时返回 None，保留硬件给出的起点。
+    正弦按相位求交点，周期性方波用重复边沿反推起点，其他波形尝试局部
+    斜率拟合。估计不可靠时返回 None，保留硬件给出的起点。
     """
     values = (np.asarray(samples[:256], dtype=np.float64) - level) * (
         -1.0 if falling else 1.0
@@ -139,6 +163,9 @@ def refine_trigger_position(
     if len(values) < 12 or values[0] < 0:
         return None
     position = _sine_trigger_position(values)
+    if position is not None:
+        return position
+    position = _square_trigger_position(values)
     if position is not None:
         return position
     if len(values) < 16:

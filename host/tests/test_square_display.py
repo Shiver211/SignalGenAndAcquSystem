@@ -32,6 +32,20 @@ def noisy_square(frequency: int, count: int, phase: float = 0.35) -> np.ndarray:
     return values
 
 
+def dual_frame(a: np.ndarray, b: np.ndarray, *, envelope: bool = False,
+               trigger_index: int = 0) -> CompletedFrame:
+    if envelope:
+        payload = np.column_stack((a, a, b, b)).astype('<u2').tobytes()
+        sample_format = SampleFormat.ENVELOPE64
+    else:
+        payload = (a.astype('<u4') | (b.astype('<u4') << 12)).tobytes()
+        sample_format = SampleFormat.RAW32
+    return CompletedFrame(
+        PacketHeader(1, 2 if envelope else 1, 1, len(a), ADC_SAMPLE_RATE_HZ,
+                     trigger_index, 3, sample_format, 0, 0, len(payload), 0), payload,
+    )
+
+
 class IdealSquareTest(unittest.TestCase):
     def test_single_vertical_transition_and_small_jitter(self) -> None:
         for frequency in (500_000, 600_000, 800_000, 1_000_000):
@@ -110,6 +124,86 @@ class IdealSquareWidgetTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_raw_and_uncompressed_envelope_have_identical_edges(self) -> None:
+        count = 1300
+        a = sampled_square_with_overshoot(1_000_000, count, 0.15)
+        b = sampled_square_with_overshoot(800_000, count, 0.75) * 0.7 + 0.2
+        a, b = (np.rint((values + 5) / 10 * 4095).astype(np.uint16)
+                for values in (a, b))
+        widget = PlotWidget()
+        try:
+            widget.set_timebase(count / ADC_SAMPLE_RATE_HZ / 10)
+            raw = dual_frame(a, b)
+            widget.display_frame(raw)
+            before = [tuple(values.copy() for values in curve.getData())
+                      for curve in (widget.curve_a, widget.curve_b)]
+            widget.display_frame(dual_frame(a, b, envelope=True))
+            for curve, (expected_x, expected_y) in zip((widget.curve_a, widget.curve_b), before):
+                x, y = curve.getData()
+                np.testing.assert_allclose(x, expected_x, rtol=0, atol=1e-15)
+                np.testing.assert_allclose(y, expected_y, rtol=0, atol=1e-12)
+            self.assertEqual(raw.payload, dual_frame(a, b).payload)
+        finally:
+            widget.close()
+
+    def test_raw_reduction_preserves_both_channels_phase_and_duty(self) -> None:
+        count, period, limit = 20_000, 1000, 200
+        indices = np.arange(count)
+        a = np.where(indices % period < 350, 3000, 1000)
+        b = np.where((indices + 200) % period < 650, 2600, 1400)
+        widget = PlotWidget()
+        try:
+            widget.set_timebase(count / ADC_SAMPLE_RATE_HZ / 10)
+            widget.set_volts_per_div(2, 2)
+            widget.set_vertical_position_div(2, -1)
+            for trigger_index in (0, 1234):
+                with self.subTest(trigger_index=trigger_index):
+                    widget.display_frame(dual_frame(a, b, trigger_index=trigger_index), max_points=limit)
+                    for curve, codes in ((widget.curve_a, a), (widget.curve_b, b)):
+                        x, y = curve.getData()
+                        self.assertLessEqual(len(x), limit)
+                        for direction in (-1, 1):
+                            jumps = np.flatnonzero(np.diff(y) * direction > 0.5)
+                            expected = (np.flatnonzero(np.diff(codes) * direction > 0)
+                                        + 0.5 - trigger_index) / ADC_SAMPLE_RATE_HZ
+                            np.testing.assert_allclose(x[jumps], expected, rtol=0, atol=1e-15)
+                            np.testing.assert_array_equal(x[jumps], x[jumps + 1])
+                        self.assertEqual(x[0], -trigger_index / ADC_SAMPLE_RATE_HZ)
+                        self.assertEqual(x[-1], (count - 1 - trigger_index) / ADC_SAMPLE_RATE_HZ)
+        finally:
+            widget.close()
+
+    def test_dense_channel_does_not_change_other_channel_or_later_rendering(self) -> None:
+        count = 6500
+        a = sampled_square_with_overshoot(1_000_000, count)
+        b = sampled_square_with_overshoot(65_000, count)
+        a, b = (np.rint((values + 5) / 10 * 4095).astype(np.uint16)
+                for values in (a, b))
+        raw = dual_frame(a, b)
+        widget = PlotWidget()
+        try:
+            widget.set_timebase(count / ADC_SAMPLE_RATE_HZ / 10)
+            widget.display_frame(raw, max_points=100)
+            self.assertEqual(widget.curve_a.opts['connect'], 'pairs')
+            self.assertEqual(widget.curve_b.opts['connect'], 'all')
+            widget.set_fft_enabled(True)
+            expected_x, expected_y = fft_spectrum(codes_to_voltage(a), ADC_SAMPLE_RATE_HZ)
+            np.testing.assert_array_equal(widget.curve_a.getData()[0], expected_x)
+            np.testing.assert_array_equal(widget.curve_a.getData()[1], expected_y)
+            self.assertEqual(widget.curve_a.opts['connect'], 'all')
+            widget.set_fft_enabled(False)
+            self.assertEqual(widget.curve_a.opts['connect'], 'all')
+            widget.display_frame(raw, max_points=100)
+            widget.display_frame(dual_frame(a, b, envelope=True))
+            self.assertEqual(widget.curve_a.opts['connect'], 'all')
+            sine = np.rint((np.sin(np.arange(count) / 10) + 5) / 10 * 4095).astype(np.uint16)
+            for envelope in (False, True):
+                widget.display_frame(raw, max_points=100)
+                widget.display_frame(dual_frame(sine, sine, envelope=envelope))
+                self.assertEqual(widget.curve_a.opts['connect'], 'all')
+        finally:
+            widget.close()
 
     def test_raw_envelope_and_both_channels_use_ideal_display(self) -> None:
         for frequency in (500_000, 600_000, 800_000, 1_000_000):
@@ -207,9 +301,13 @@ class IdealSquareWidgetTest(unittest.TestCase):
             widget.set_timebase(count / ADC_SAMPLE_RATE_HZ / 10)
             widget.display_frame(frame, max_points=1000)
             x, y = widget.curve_a.getData()
-            self.assertLess(len(x), count)
+            self.assertLessEqual(len(x), 1000)
             self.assertLessEqual(float(np.abs(y).max()), 1.045)
             self.assertTrue(np.all(np.diff(x) >= 0))
+            # 超过点数预算的密集跳变只画桶内范围，不能连成虚假的低频方波。
+            self.assertEqual(widget.curve_a.opts['connect'], 'pairs')
+            np.testing.assert_array_equal(x[::2], x[1::2])
+            self.assertTrue(np.all(y[::2] <= y[1::2]))
         finally:
             widget.close()
         # 完整采样已去掉过冲，抽点不会把尖峰再选回来。

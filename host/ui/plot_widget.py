@@ -18,7 +18,7 @@ from host.comm.data_protocol import (
 )
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
 from host.core.waveform import (
-    clean_square_waveform, codes_to_voltage, fft_spectrum,
+    codes_to_voltage, fft_spectrum,
     idealize_square_display, refine_trigger_position, smooth_continuous_display,
 )
 
@@ -298,7 +298,7 @@ class PlotWidget(QtWidgets.QWidget):
         ENVELOPE 若 ``trigger_index`` 大于 0 同样居中，否则从帧起点计时。
         已配置触发参数的 1:1 连续帧会细化首点时间；回放可关闭此校正。
         可识别的方波自动整形；连续波形适度平滑，包络保留 Min/Max 范围。
-        长记录先在等间隔样点上处理显示副本，再按桶内极值抽点。
+        方波先由原始样点定位边沿，再保留竖线端点抽点；其余波形保留桶内极值。
         """
         if not align_trigger:
             self._frame_trigger_alignment = None
@@ -343,22 +343,20 @@ class PlotWidget(QtWidgets.QWidget):
             if visible < len(a):
                 a = a[:visible]
                 b = b[:visible]
-        cleaned_a = clean_square_waveform(a)
-        a = cleaned_a if cleaned_a is not None else self._smooth_display(a, sample_rate, 1)
-        cleaned_b = clean_square_waveform(b)
-        b = cleaned_b if cleaned_b is not None else self._smooth_display(b, sample_rate, 2)
-        indices, display_a, display_b = self._reduce_raw_for_display(
-            a, b, max_points,
-        )
-        x = (indices - (trigger_index if align_trigger else 0)) / sample_rate
+        x = (np.arange(len(a), dtype=np.float64) - trigger_index) / sample_rate
         self._has_trigger_alignment = align_trigger
         self._set_time_range()
         self._clear_envelope()
         self._envelope_active = False
-        for channel, curve, values in ((1, self.curve_a, display_a), (2, self.curve_b, display_b)):
+        for channel, curve, values in ((1, self.curve_a, a), (2, self.curve_b, b)):
+            # 清理前的过渡样点含有亚采样时间信息，只整形一次，避免重新定时。
             ideal = idealize_square_display(x, values)
-            display_x, display_y = ideal if ideal is not None else (x, values)
-            curve.setData(display_x, self._to_divisions(display_y, channel))
+            display_x, display_y = (ideal if ideal is not None else
+                                    (x, self._smooth_display(values, sample_rate, channel)))
+            display_x, display_y, connect = self._reduce_curve_for_display(
+                display_x, display_y, max_points, square=ideal is not None,
+            )
+            curve.setData(display_x, self._to_divisions(display_y, channel), connect=connect)
         self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
@@ -395,7 +393,8 @@ class PlotWidget(QtWidgets.QWidget):
             ideal = idealize_square_display(x, lo, hi)
             if ideal is not None:
                 display_x, codes = ideal
-                curve.setData(display_x, self._to_divisions(self._codes_to_volts(codes, channel), channel))
+                curve.setData(display_x, self._to_divisions(self._codes_to_volts(codes, channel), channel),
+                              connect="all")
                 minimum.clear()
                 maximum.clear()
             else:
@@ -403,6 +402,7 @@ class PlotWidget(QtWidgets.QWidget):
                 center = self._smooth_display((lo + hi) / 2.0, sample_rate, channel)
                 curve.setData(
                     x, self._to_divisions(self._codes_to_volts(center, channel), channel),
+                    connect="all",
                 )
                 span_div = (
                     np.abs(
@@ -457,8 +457,8 @@ class PlotWidget(QtWidgets.QWidget):
         fb, mb = fft_spectrum(b, sample_rate_hz)
         self._has_trigger_alignment = False
         self._clear_envelope()
-        self.curve_a.setData(fa, ma)
-        self.curve_b.setData(fb, mb)
+        self.curve_a.setData(fa, ma, connect="all")
+        self.curve_b.setData(fb, mb, connect="all")
         self.trigger_line.setVisible(False)
         if fa.size:
             self.plot.setXRange(0, sample_rate_hz / 2, padding=0)
@@ -490,30 +490,40 @@ class PlotWidget(QtWidgets.QWidget):
                 settings["volts_per_div"] + settings["position_div"])
 
     @staticmethod
-    def _reduce_raw_for_display(
-        values_a: np.ndarray, values_b: np.ndarray, max_points: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """降采样时保留每个时间桶的两个通道极值，绝不删除窄脉冲。"""
-        a = np.asarray(values_a, dtype=np.float64)
-        b = np.asarray(values_b, dtype=np.float64)
-        # 双通道 min/max 至少需要四个候选点；正常 UI 上限远大于此值。
+    def _reduce_curve_for_display(
+        time: np.ndarray, values: np.ndarray, max_points: int, *, square: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """各通道独立抽点，保留原时间坐标、首尾点、方波边沿和桶内极值。"""
         limit = max(4, int(max_points))
-        if len(a) <= limit:
-            return np.arange(len(a), dtype=np.float64), a, b
-        # 每个桶最多保留 CH1/CH2 的 min/max 四个点，候选点数因此
-        # 不会超过 limit；不再事后均匀裁剪极值点。
-        bucket_count = max(1, limit // 4)
-        edges = np.linspace(0, len(a), bucket_count + 1, dtype=np.int64)
-        selected: set[int] = set()
-        for start, end in zip(edges[:-1], edges[1:]):
-            if end <= start:
-                continue
-            selected.add(int(start + np.argmin(a[start:end])))
-            selected.add(int(start + np.argmax(a[start:end])))
-            selected.add(int(start + np.argmin(b[start:end])))
-            selected.add(int(start + np.argmax(b[start:end])))
-        indices = np.asarray(sorted(selected), dtype=np.int64)
-        return indices.astype(np.float64), a[indices], b[indices]
+        if len(time) <= limit:
+            return time, values, "all"
+        required = np.array([0, len(time) - 1], dtype=np.int64)
+        if square:
+            vertical = np.flatnonzero((np.diff(time) == 0) & (np.diff(values) != 0))
+            required = np.unique(np.r_[required, vertical, vertical + 1])
+            if len(required) > limit:
+                # 边沿数已超出预算：仅画每桶的幅度范围，不把稀疏极值连成假周期。
+                boundaries = np.linspace(0, len(time), limit // 2 + 1, dtype=np.int64)
+                centers = (time[boundaries[:-1]] + time[boundaries[1:] - 1]) / 2
+                minimum = np.minimum.reduceat(values, boundaries[:-1])
+                maximum = np.maximum.reduceat(values, boundaries[:-1])
+                return (np.repeat(centers, 2),
+                        np.column_stack((minimum, maximum)).ravel(), "pairs")
+        # 先预留所有边沿端点，余下预算用于平台极值；抽点后不再识别方波。
+        bucket_count = (limit - len(required)) // 2
+        if bucket_count == 0:
+            return time[required], values[required], "all"
+        bucket_size = (len(time) + bucket_count - 1) // bucket_count
+        full_count, remainder = divmod(len(time), bucket_size)
+        tail = full_count * bucket_size
+        buckets = values[:tail].reshape(full_count, bucket_size)
+        starts = np.arange(full_count) * bucket_size
+        selected = [required, starts + np.argmin(buckets, axis=1),
+                    starts + np.argmax(buckets, axis=1)]
+        if remainder:
+            selected.append(tail + np.array([np.argmin(values[tail:]), np.argmax(values[tail:])]))
+        indices = np.unique(np.concatenate(selected))
+        return time[indices], values[indices], "all"
 
     def _clamped_trigger_index(self, frame: CompletedFrame, count: int) -> int:
         if count <= 0:

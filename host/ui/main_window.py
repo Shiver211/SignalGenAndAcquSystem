@@ -26,6 +26,9 @@ from host.config import (
     ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
     PC_IP, UART_BAUD, UDP_PORT,
 )
+from host.core.dac_calibration import (
+    TEST_FRACTION, full_scale_vpp_from_test, nominal_vpk_for_target,
+)
 from host.core.waveform import (
     MeasurementDisplayFilter, code_to_voltage, fixed_dc_offset_v, format_frequency_hz,
     format_voltage, gain_from_known_vpp, square_plateau_stats, vpp_from_code_span,
@@ -55,6 +58,7 @@ TIME_PER_DIV = (
     # RAW 环形区最多约 0.90s；保留到 50ms/div（0.5s/屏），避免
     # UI 显示的十格时间窗超过 FPGA 实际可采集深度。
 )
+DAC_GAIN_MODES = ("low", "high")
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -101,6 +105,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_retried = False
         self.settings = settings or QtCore.QSettings("FPGA Signal System", "Host")
         self._load_adc_calibration()
+        self._dac_full_scale_vpp: dict[tuple[int, int], float] = {}
+        self._dac_test_modes: tuple[int, int] | None = None
+        self._load_dac_calibration()
         self._build_ui()
         self._connect_signals()
         self._refresh_ports()
@@ -119,7 +126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self._build_control_panel())
         splitter.addWidget(self._build_display_panel())
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([430, 1050])
+        splitter.setSizes([520, 960])
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("就绪")
 
@@ -166,12 +173,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _generator_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("DAC 波形控制")
-        grid = QtWidgets.QGridLayout(group)
-        grid.addWidget(QtWidgets.QLabel(""), 0, 0)
-        grid.addWidget(QtWidgets.QLabel("CH1"), 0, 1)
-        grid.addWidget(QtWidgets.QLabel("CH2"), 0, 2)
+        layout = QtWidgets.QVBoxLayout(group)
         self.wave_boxes, self.frequency_spins, self.amplitude_spins = [], [], []
+        self.dac_mode_boxes, self.dac_measured_spins = [], []
+        self.dac_calibration_labels = []
         for channel in range(2):
+            channel_group = QtWidgets.QGroupBox(f"CH{channel + 1}")
+            grid = QtWidgets.QGridLayout(channel_group)
             wave = QtWidgets.QComboBox()
             wave.addItems(["正弦", "三角", "方波"])
             frequency = QtWidgets.QDoubleSpinBox()
@@ -179,22 +187,48 @@ class MainWindow(QtWidgets.QMainWindow):
             frequency.setDecimals(3)
             frequency.setValue(1000 * (channel + 1))
             frequency.setSuffix(" Hz")
+            mode = QtWidgets.QComboBox()
+            mode.addItems(["低压档（最小增益）", "高压档（最大增益）"])
             amplitude = QtWidgets.QDoubleSpinBox()
             amplitude.setRange(0, 5)
             amplitude.setDecimals(3)
-            amplitude.setValue(1.0)
-            amplitude.setSuffix(" Vpk")
+            amplitude.setSingleStep(0.1)
+            amplitude.setValue(0.1)
+            amplitude.setSuffix(" Vpp")
+            amplitude.setSpecialValueText("关闭")
+            measured = QtWidgets.QDoubleSpinBox()
+            measured.setRange(0, 10)
+            measured.setDecimals(3)
+            measured.setSuffix(" Vpp")
+            calibration_label = QtWidgets.QLabel()
+            calibrate = QtWidgets.QPushButton(f"保存 CH{channel + 1} 当前档标定")
+            calibrate.clicked.connect(
+                lambda _checked=False, ch=channel + 1: self._calibrate_dac_amplitude(ch)
+            )
             self.wave_boxes.append(wave)
             self.frequency_spins.append(frequency)
+            self.dac_mode_boxes.append(mode)
             self.amplitude_spins.append(amplitude)
-            grid.addWidget(wave, 1, channel + 1)
-            grid.addWidget(frequency, 2, channel + 1)
-            grid.addWidget(amplitude, 3, channel + 1)
-        grid.addWidget(QtWidgets.QLabel("波形"), 1, 0)
-        grid.addWidget(QtWidgets.QLabel("频率"), 2, 0)
-        grid.addWidget(QtWidgets.QLabel("幅度"), 3, 0)
+            self.dac_measured_spins.append(measured)
+            self.dac_calibration_labels.append(calibration_label)
+            for row, title, widget in (
+                (0, "波形", wave), (1, "频率", frequency),
+                (2, "手动增益档", mode), (3, "目标幅度", amplitude),
+                (4, "示波器实测", measured),
+            ):
+                grid.addWidget(QtWidgets.QLabel(title), row, 0)
+                grid.addWidget(widget, row, 1)
+            grid.addWidget(calibrate, 5, 0, 1, 2)
+            grid.addWidget(calibration_label, 6, 0, 1, 2)
+            self._update_dac_calibration_label(channel + 1)
+            layout.addWidget(channel_group)
+        self.dac_test_button = QtWidgets.QPushButton("发送 1 kHz / 25% 标定波形（双通道）")
+        layout.addWidget(self.dac_test_button)
         self.apply_generator_button = QtWidgets.QPushButton("原子提交两通道参数")
-        grid.addWidget(self.apply_generator_button, 4, 0, 1, 3)
+        layout.addWidget(self.apply_generator_button)
+        hint = QtWidgets.QLabel("切档请旋到已标定端点：CH1 高档顺时针，CH2 高档逆时针；低档相反。端点以外的位置需重新标定。")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         return group
 
     def _acquisition_group(self) -> QtWidgets.QGroupBox:
@@ -395,6 +429,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uart_button.clicked.connect(self._toggle_uart)
         self.udp_button.clicked.connect(self._toggle_udp)
         self.apply_generator_button.clicked.connect(self._apply_generator)
+        self.dac_test_button.clicked.connect(self._send_dac_calibration_test)
+        for channel in (1, 2):
+            self.dac_mode_boxes[channel - 1].currentIndexChanged.connect(
+                lambda _index, ch=channel: self._on_dac_mode_changed(ch)
+            )
         self.apply_acquisition_button.clicked.connect(self._apply_acquisition)
         self.run_button.clicked.connect(self._run_acquisition)
         self.stop_button.clicked.connect(self._stop_acquisition)
@@ -467,12 +506,75 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.udp_receiver.start(self.udp_bind_edit.text().strip(), self.udp_port_spin.value())
 
+    def _dac_calibration_key(self, channel: int, mode: int) -> str:
+        return f"dac_cal/ch{channel}/{DAC_GAIN_MODES[mode]}_full_scale_vpp"
+
+    def _load_dac_calibration(self) -> None:
+        for channel in (1, 2):
+            for mode in range(len(DAC_GAIN_MODES)):
+                key = self._dac_calibration_key(channel, mode)
+                if self.settings.contains(key):
+                    self._dac_full_scale_vpp[(channel, mode)] = self.settings.value(key, type=float)
+
+    def _update_dac_calibration_label(self, channel: int) -> None:
+        mode = self.dac_mode_boxes[channel - 1].currentIndex()
+        full_scale = self._dac_full_scale_vpp.get((channel, mode))
+        self.dac_calibration_labels[channel - 1].setText(
+            f"满码等效 {full_scale:.3f} Vpp" if full_scale is not None else "该档未标定"
+        )
+
+    def _on_dac_mode_changed(self, channel: int) -> None:
+        self._dac_test_modes = None
+        self._update_dac_calibration_label(channel)
+        self.statusBar().showMessage("请手动将对应通道的增益旋钮调到所选档位端点", 6000)
+
+    def _send_dac_calibration_test(self) -> None:
+        self._dac_test_modes = None
+        for channel in (1, 2):
+            payload = generator_payload(
+                channel, Waveform.SINE, 1000.0, 5.0 * TEST_FRACTION,
+                commit=(channel == 2),
+            )
+            self.serial_link.send_command(Command.SET_GENERATOR, payload)
+        self._dac_test_modes = tuple(box.currentIndex() for box in self.dac_mode_boxes)
+        self.statusBar().showMessage("已发送双通道 25% 测试波形；高阻示波器测量后分别保存标定", 8000)
+
+    def _calibrate_dac_amplitude(self, channel: int) -> None:
+        mode = self.dac_mode_boxes[channel - 1].currentIndex()
+        if self._dac_test_modes is None or self._dac_test_modes[channel - 1] != mode:
+            self.statusBar().showMessage("请先发送当前档位的标定测试波形", 5000)
+            return
+        try:
+            full_scale = full_scale_vpp_from_test(self.dac_measured_spins[channel - 1].value())
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc), 5000)
+            return
+        self._dac_full_scale_vpp[(channel, mode)] = full_scale
+        self.settings.setValue(self._dac_calibration_key(channel, mode), full_scale)
+        self._update_dac_calibration_label(channel)
+        self.statusBar().showMessage(f"CH{channel} {DAC_GAIN_MODES[mode]} 档已标定", 5000)
+
     def _apply_generator(self) -> None:
+        amplitudes = []
+        for channel in (1, 2):
+            mode = self.dac_mode_boxes[channel - 1].currentIndex()
+            target_vpp = self.amplitude_spins[channel - 1].value()
+            try:
+                if 0 < target_vpp < 0.1:
+                    raise ValueError("目标峰峰值须为 0 或至少 0.1 Vpp")
+                nominal_vpk = nominal_vpk_for_target(
+                    target_vpp, self._dac_full_scale_vpp.get((channel, mode), 0.0),
+                )
+            except ValueError as exc:
+                self.statusBar().showMessage(f"CH{channel} {exc}", 6000)
+                return
+            amplitudes.append(nominal_vpk)
+        self._dac_test_modes = None
         for channel in (1, 2):
             payload = generator_payload(
                 channel, Waveform(self.wave_boxes[channel - 1].currentIndex()),
                 self.frequency_spins[channel - 1].value(),
-                self.amplitude_spins[channel - 1].value(), commit=(channel == 2),
+                amplitudes[channel - 1], commit=(channel == 2),
             )
             self.serial_link.send_command(Command.SET_GENERATOR, payload)
 

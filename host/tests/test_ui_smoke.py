@@ -73,12 +73,79 @@ class UiSmokeTest(unittest.TestCase):
             window.wave_boxes[0].setCurrentText("三角")
             window.frequency_spins[0].setValue(1250)
             window.amplitude_spins[0].setValue(0.8)
+            window._dac_full_scale_vpp[(1, 0)] = 2.0
+            window._dac_full_scale_vpp[(2, 0)] = 2.0
             with mock.patch.object(window.serial_link, "send_command") as send:
                 window._apply_generator()
             self.assertEqual(len(send.call_args_list), 2)
             self.assertTrue(all(call.args[0] == Command.SET_GENERATOR for call in send.call_args_list))
             self.assertEqual(send.call_args_list[0].args[1][-1], 0)
             self.assertEqual(send.call_args_list[1].args[1][-1], 1)
+            window.close()
+            self.app.processEvents()
+
+    def test_dac_modes_calibrate_independently_and_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "dac_modes.db"
+            window = create_window(database)
+            window.dac_mode_boxes[1].setCurrentIndex(1)
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._apply_generator()
+                send.assert_not_called()
+                window._send_dac_calibration_test()
+            self.assertEqual(len(send.call_args_list), 2)
+            for call in send.call_args_list:
+                self.assertEqual(struct.unpack_from("<H", call.args[1], 6)[0], 0x2000)
+            window.dac_measured_spins[0].setValue(0.125)
+            window.dac_measured_spins[1].setValue(1.5)
+            window._calibrate_dac_amplitude(1)
+            window._calibrate_dac_amplitude(2)
+            self.assertAlmostEqual(window._dac_full_scale_vpp[(1, 0)], 0.5)
+            self.assertAlmostEqual(window._dac_full_scale_vpp[(2, 1)], 6.0)
+            window.dac_mode_boxes[0].setCurrentIndex(1)
+            with mock.patch.object(window.serial_link, "send_command"):
+                window._send_dac_calibration_test()
+            window.dac_measured_spins[0].setValue(1.25)
+            window._calibrate_dac_amplitude(1)
+            window.dac_mode_boxes[0].setCurrentIndex(0)
+            self.assertAlmostEqual(window._dac_full_scale_vpp[(1, 1)], 5.0)
+            self.assertIn("0.500 Vpp", window.dac_calibration_labels[0].text())
+            window.amplitude_spins[0].setValue(0.1)
+            window.amplitude_spins[1].setValue(5.0)
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._apply_generator()
+            self.assertEqual(len(send.call_args_list), 2)
+            self.assertEqual(
+                [struct.unpack_from("<H", call.args[1], 6)[0] for call in send.call_args_list],
+                [round(0.1 / 0.5 * 0x8000), round(5.0 / 6.0 * 0x8000)],
+            )
+            window.settings.sync()
+            window.close()
+            self.app.processEvents()
+            reopened = create_window(database)
+            self.assertAlmostEqual(reopened._dac_full_scale_vpp[(1, 0)], 0.5)
+            self.assertAlmostEqual(reopened._dac_full_scale_vpp[(1, 1)], 5.0)
+            self.assertAlmostEqual(reopened._dac_full_scale_vpp[(2, 1)], 6.0)
+            reopened.close()
+            self.app.processEvents()
+
+    def test_dac_mode_change_invalidates_test_and_low_range_rejects_overflow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "dac_range.db")
+            with mock.patch.object(window.serial_link, "send_command"):
+                window._send_dac_calibration_test()
+            window.dac_mode_boxes[0].setCurrentIndex(1)
+            window.dac_measured_spins[0].setValue(1.0)
+            window._calibrate_dac_amplitude(1)
+            self.assertNotIn((1, 1), window._dac_full_scale_vpp)
+            window.dac_mode_boxes[0].setCurrentIndex(0)
+            window._dac_full_scale_vpp[(1, 0)] = 0.5
+            window._dac_full_scale_vpp[(2, 0)] = 0.5
+            window.amplitude_spins[0].setValue(1.0)
+            with mock.patch.object(window.serial_link, "send_command") as send:
+                window._apply_generator()
+            send.assert_not_called()
+            self.assertIn("切换档位", window.statusBar().currentMessage())
             window.close()
             self.app.processEvents()
 

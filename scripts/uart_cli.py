@@ -124,8 +124,8 @@ def build_generator_payload(args: argparse.Namespace) -> bytes:
     amplitude_q15 = round(args.amplitude_vpk / 5.0 * 0x8000)
     if not 0 <= amplitude_q15 <= 0x8000:
         raise ValueError("amplitude-vpk 必须在 0..5V")
-    if not 0 <= ftw <= 0x09374BC7:
-        raise ValueError("FTW 超出 M3 允许范围 0x00000000..0x09374BC7")
+    if not 0 <= ftw <= 0x0020C49C:
+        raise ValueError("FTW 超出 AD9767 允许范围 0x00000000..0x0020C49C")
 
     return struct.pack(
         "<BBIHHB",
@@ -247,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     frequency_group = generator.add_mutually_exclusive_group(required=True)
     frequency_group.add_argument("--frequency", type=float)
     frequency_group.add_argument("--ftw", type=parse_int)
-    generator.add_argument("--update-rate", type=float, default=1_388_888.888888889)
+    generator.add_argument("--update-rate", type=float, default=100_000_000.0)
     generator.add_argument("--amplitude-vpk", type=float, required=True)
     generator.add_argument("--dc-code", type=parse_int, default=0x8000)
     generator.add_argument("--stage", action="store_true", help="只写影子寄存器，不提交")

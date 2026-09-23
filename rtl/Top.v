@@ -5,10 +5,12 @@ module Top (
     input  wire sys_rst_n,
     input  wire uart_rxd,
     output wire uart_txd,
-    output wire dac_sclk,
-    output wire dac_cs1_n,
-    output wire dac_cs2_n,
-    output wire dac_mosi,
+    output wire [13:0] dac_da,
+    output wire [13:0] dac_db,
+    output wire dac_wr1,
+    output wire dac_wr2,
+    output wire dac_aclk,
+    output wire dac_bclk,
     output wire adc_clk_a,
     input  wire [11:0] adc_data_a,
     input  wire adc_ora,
@@ -73,10 +75,8 @@ module Top (
     wire [15:0] dc_code_ch2;
     wire [15:0] gain_q15_ch2;
     wire signed [15:0] offset_code_ch2;
-    wire sample_commit_ch1;
-    wire sample_commit_ch2;
-    wire [31:0] dac_update_rate_ch1_hz;
-    wire [31:0] dac_update_rate_ch2_hz;
+    wire [31:0] dac_update_rate_ch1_hz = 32'd100_000_000;
+    wire [31:0] dac_update_rate_ch2_hz = 32'd100_000_000;
 
     wire [169:0] adc_control_config;
     wire [15:0] adc_control_apply_count;
@@ -346,7 +346,7 @@ module Top (
         .config_sequence            ()
     );
 
-    signal_gen_dual u_signal_gen_dual (
+    ad9767_signal_gen u_ad9767_signal_gen (
         .clk               (clk_sys_100m),
         .reset             (rst_sys),
         .wave_sel_ch1      (wave_sel_ch1),
@@ -361,27 +361,12 @@ module Top (
         .dc_code_ch2       (dc_code_ch2),
         .gain_q15_ch2      (gain_q15_ch2),
         .offset_code_ch2   (offset_code_ch2),
-        .dac_sclk          (dac_sclk),
-        .dac_cs1_n         (dac_cs1_n),
-        .dac_cs2_n         (dac_cs2_n),
-        .dac_mosi          (dac_mosi),
-        .sample_commit_ch1 (sample_commit_ch1),
-        .sample_commit_ch2 (sample_commit_ch2),
-        .dac_code_ch1      (),
-        .dac_code_ch2      (),
-        .phase_ch1         (),
-        .phase_ch2         ()
-    );
-
-    dac_update_rate_meter #(
-        .CLK_FREQ_HZ (100_000_000)
-    ) u_dac_update_rate_meter (
-        .clk                    (clk_sys_100m),
-        .reset                  (rst_sys),
-        .sample_commit_ch1      (sample_commit_ch1),
-        .sample_commit_ch2      (sample_commit_ch2),
-        .update_rate_ch1_hz     (dac_update_rate_ch1_hz),
-        .update_rate_ch2_hz     (dac_update_rate_ch2_hz)
+        .dac_da            (dac_da),
+        .dac_db            (dac_db),
+        .dac_wr1           (dac_wr1),
+        .dac_wr2           (dac_wr2),
+        .dac_aclk          (dac_aclk),
+        .dac_bclk          (dac_bclk)
     );
 
     // ADC 读时钟心跳返回系统域，用于 UART 状态中的时钟存活检测。

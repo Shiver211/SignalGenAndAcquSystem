@@ -41,6 +41,9 @@ class ControlProtocolTest(unittest.TestCase):
         channel, wave, ftw, amplitude, dc, flags = struct.unpack("<BBIHHB", generator)
         self.assertEqual((channel, wave, amplitude, dc, flags), (0, 0, 0x199A, 0x8000, 0))
         self.assertGreater(ftw, 0)
+        self.assertEqual(ftw, round(1000 * (1 << 32) / 100_000_000))
+        maximum = generator_payload(2, Waveform.SINE, 50_000, 1.0)
+        self.assertEqual(struct.unpack_from("<I", maximum, 2)[0], 0x0020C49C)
         acquisition = acquisition_payload(0, 2048, 16, 0, 20_000, 50, channel_mask=1)
         self.assertEqual(len(acquisition), 14)
         processing = processing_payload(DataMode.ENVELOPE, 16, 1024, 20)
@@ -50,7 +53,7 @@ class ControlProtocolTest(unittest.TestCase):
         payload = bytearray(32)
         payload[0:5] = bytes((1, 0, 0, 7, 0))
         payload[5] = 0b01111010
-        struct.pack_into("<IIIIIHH", payload, 8, 1, 2, 3, 1_388_888, 1_388_888, 9, 4)
+        struct.pack_into("<IIIIIHH", payload, 8, 1, 2, 3, 100_000_000, 100_000_000, 9, 4)
         status = parse_device_status(payload)
         self.assertTrue(status["adc_armed"])
         self.assertTrue(status["ddr_calibrated"])

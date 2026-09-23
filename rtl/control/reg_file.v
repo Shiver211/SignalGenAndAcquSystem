@@ -2,7 +2,7 @@
 
 module reg_file #(
     parameter integer MAX_PAYLOAD_BYTES = 32,
-    parameter [31:0]  MAX_DAC_FTW       = 32'h0937_4BC7
+    parameter [31:0]  MAX_DAC_FTW       = 32'h0020_C49C
 ) (
     input  wire                                 clk,
     input  wire                                 reset,

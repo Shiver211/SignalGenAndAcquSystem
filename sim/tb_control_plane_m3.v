@@ -76,8 +76,8 @@ module tb_control_plane_m3;
         .adc_clock_alive            (1'b1),
         .mmcm_locked                (1'b1),
         .adc_capture_done           (1'b0),
-        .dac_update_rate_ch1_hz     (32'd1_388_889),
-        .dac_update_rate_ch2_hz     (32'd1_388_888),
+        .dac_update_rate_ch1_hz     (32'd100_000_000),
+        .dac_update_rate_ch2_hz     (32'd100_000_000),
         .raw_frame_valid            (raw_frame_valid),
         .raw_frame_id               (raw_frame_id),
         .raw_frame_total_bytes      (raw_frame_total_bytes),
@@ -308,7 +308,7 @@ module tb_control_plane_m3;
         clear_request_payload();
         request_payload[0  * 8 +: 8]  = 8'd0;
         request_payload[1  * 8 +: 8]  = 8'd2;
-        request_payload[2  * 8 +: 32] = 32'h0102_0304;
+        request_payload[2  * 8 +: 32] = 32'h0010_2030;
         request_payload[6  * 8 +: 16] = 16'h4000;
         request_payload[8  * 8 +: 16] = 16'h9234;
         request_payload[10 * 8 +: 8]  = 8'd0;
@@ -326,16 +326,16 @@ module tb_control_plane_m3;
         clear_request_payload();
         request_payload[0  * 8 +: 8]  = 8'd1;
         request_payload[1  * 8 +: 8]  = 8'd1;
-        request_payload[2  * 8 +: 32] = 32'h005E_5F31;
+        request_payload[2  * 8 +: 32] = 32'h000E_1F31;
         request_payload[6  * 8 +: 16] = 16'h3333;
         request_payload[8  * 8 +: 16] = 16'h8000;
         request_payload[10 * 8 +: 8]  = 8'd1;
         send_request(8'h01, 8'd11, request_payload, 1'b0);
         expect_response(8'h01, 8'h00);
 
-        if ((wave_sel_ch1 !== 2'd2) || (ftw_ch1 !== 32'h0102_0304) ||
+        if ((wave_sel_ch1 !== 2'd2) || (ftw_ch1 !== 32'h0010_2030) ||
             (amplitude_q15_ch1 !== 16'h4000) || (dc_code_ch1 !== 16'h9234) ||
-            (wave_sel_ch2 !== 2'd1) || (ftw_ch2 !== 32'h005E_5F31) ||
+            (wave_sel_ch2 !== 2'd1) || (ftw_ch2 !== 32'h000E_1F31) ||
             (amplitude_q15_ch2 !== 16'h3333)) begin
             $display("[FAIL] dual-channel generator commit mismatch");
             failures = failures + 1;
@@ -565,8 +565,8 @@ module tb_control_plane_m3;
             (observed_payload[5 * 8 +: 8] !== 8'h64) ||
             (observed_payload[6 * 8 +: 8] !== 8'h05) ||
             (observed_payload[8 * 8 +: 32] !== 32'd1) ||
-            (observed_payload[20 * 8 +: 32] !== 32'd1_388_889) ||
-            (observed_payload[24 * 8 +: 32] !== 32'd1_388_888) ||
+            (observed_payload[20 * 8 +: 32] !== 32'd100_000_000) ||
+            (observed_payload[24 * 8 +: 32] !== 32'd100_000_000) ||
             (observed_payload[28 * 8 +: 16] !== 16'd2)) begin
             $display("[FAIL] status payload mismatch");
             failures = failures + 1;

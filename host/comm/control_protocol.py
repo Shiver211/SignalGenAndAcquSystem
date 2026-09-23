@@ -127,7 +127,7 @@ def generator_payload(
     amplitude_vpk: float,
     *,
     dc_code: int = 0x8000,
-    update_rate_hz: float = 1_388_888.888888889,
+    update_rate_hz: float = 100_000_000.0,
     commit: bool = True,
 ) -> bytes:
     if channel not in (1, 2):

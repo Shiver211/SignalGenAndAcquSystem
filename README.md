@@ -3,11 +3,18 @@
 Artix-7 FPGA 双通道采集与信号发生工程，上位机使用 Python / PyQt5。
 FPGA 工具版本为 Vivado 2025.2，主工程入口为 `Signal.xpr`。
 
+AD9767 使用双通道 14 位并行接口，每通道更新率为 100 MSPS；
+`constraints/board.xdc` 按实际接线分配 DA/DB、WR1/WR2、ACLK/BCLK。
+这 32 根线均在 Bank15，下载位流前须实测其 VCCIO 为 3.3V。
+原有 UART 双通道参数协议仍为 16 位码，输出时取高 14 位；
+B 通道在数字侧取反以补偿模块后级反相。模块模拟增益由板上电位器决定，
+上位机电压刻度应在接入实物后用示波器重新标定。
+
 ```text
 Signal.xpr       Vivado 工程配置
 rtl/             当前 FPGA RTL
 constraints/     管脚与时序约束
-ip/              IP 配置及 ROM 初始化数据
+ip/              时钟、DDR3 等 IP 配置
 sim/             仿真、参考模型和测试向量
 host/            上位机代码、测试及使用说明
 scripts/         构建、烧录、检查、清理及串口工具
@@ -50,7 +57,7 @@ GUI 测试使用独立的临时 INI 配置，避免本机幅度校准值影响�
 `host/data/` 中的数据库、`references/` 中的资料和 `artifacts/` 中的归档
 不参与版本管理，也不由清理脚本删除。清理前应关闭 Vivado 和仿真进程。
 
-`ip/` 中的 XCI、MIG PRJ 和 ROM 初始化文件是输入文件；网表、DCP 和
+`ip/` 中的 XCI 和 MIG PRJ 是输入文件；网表、DCP 和
 其余输出产品由 Vivado 生成。构建入口会自动准备 IP，并处理 Vivado 2025.2
 Windows 下 MIG 首次生成时的临时目录占用问题。日志位于 `build/vivado/`。
 IP 输出和缓存继续使用原工程配置的目录；Vivado 自身的 `Signal.*` 工作目录会按需重建。

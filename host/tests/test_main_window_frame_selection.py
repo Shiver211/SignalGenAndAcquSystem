@@ -77,6 +77,20 @@ class MainWindowFrameSelectionTest(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_switching_channel_clears_stale_readings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "channel-readings.db")
+            try:
+                window._on_frame(frame(SampleFormat.MEASUREMENT_V1, dual_measurement_payload()))
+                self.assertEqual(window.measurement_labels[7].text(), "10.000 kHz")
+                window.channel_mode_combo.setCurrentText("CH1")
+                self.assertEqual([label.text() for label in window.measurement_labels[:4]], ["—"] * 4)
+                self.assertEqual([label.text() for label in window.measurement_labels[4:]], ["未启用"] * 4)
+                self.assertEqual(window.status_labels["otr"].text(), "—/未启用")
+            finally:
+                window.close()
+                self.app.processEvents()
+
     def test_amplitude_calibration_converts_codes_to_known_vpp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = QtCore.QSettings(

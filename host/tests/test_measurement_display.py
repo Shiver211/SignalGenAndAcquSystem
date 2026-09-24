@@ -13,7 +13,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
-from host.core.waveform import MeasurementDisplayFilter, format_frequency_hz, format_voltage
+from host.core.waveform import (
+    MeasurementDisplayFilter, code_to_voltage, fixed_dc_offset_v,
+    format_frequency_hz, format_voltage,
+)
 from host.tests.window_helpers import create_window
 
 
@@ -107,7 +110,7 @@ class MeasurementDisplayWindowTest(unittest.TestCase):
                     10_000 + (1 if index % 2 == 0 else -1), 12_000,
                 ))
             self.assertEqual(window.measurement_labels[0].text(),
-                             format_voltage(1600 / 4095 * 10 - 5))
+                             format_voltage(code_to_voltage(1600, offset_v=fixed_dc_offset_v(1))))
             self.assertEqual(window.measurement_labels[2].text(),
                              format_voltage((2444 - 1600) / 4095 * 10, peak_to_peak=True))
             self.assertEqual(window.measurement_labels[3].text(), "10.000 kHz")

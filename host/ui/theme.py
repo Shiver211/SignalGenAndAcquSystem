@@ -74,11 +74,11 @@ QLabel[role="caption"] {{ color: {_MUTED}; font-size: 9pt; }}
 QLabel[role="field"] {{ color: #aab3c2; }}
 QLabel[role="value"] {{
     color: #f5f7fa; font-family: "Cascadia Mono", Consolas, monospace;
-    font-size: 17pt; font-weight: 600;
+    font-size: 16pt; font-weight: 600;
 }}
 QLabel[role="chip"] {{
     background: #161c25; border: 1px solid {_BORDER}; border-radius: 13px;
-    padding: 4px 12px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 9pt;
+    padding: 4px 6px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 9pt;
 }}
 QLabel[role="led"] {{ color: #6f7a8c; font-size: 9pt; }}
 QLabel[role="led"][state="ok"] {{ color: #4ade80; }}

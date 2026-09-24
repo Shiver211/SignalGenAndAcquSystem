@@ -58,8 +58,7 @@ TIME_PER_DIV = (
     (100e-6, "100 µs/div"), (200e-6, "200 µs/div"), (500e-6, "500 µs/div"),
     (1e-3, "1 ms/div"), (2e-3, "2 ms/div"), (5e-3, "5 ms/div"),
     (10e-3, "10 ms/div"), (20e-3, "20 ms/div"), (50e-3, "50 ms/div"),
-    # RAW 环形区最多约 0.90s；保留到 50ms/div（0.5s/屏），避免
-    # UI 显示的十格时间窗超过 FPGA 实际可采集深度。
+    (100e-3, "100 ms/div"),  # 手动 900 ms 记录需要 1 s 的十格窗口。
 )
 DAC_GAIN_MODES = ("low", "high")
 STATUS_OK = {"已连接", "已校准", "锁定", "正常", "就绪", "空闲", "ARM"}
@@ -187,6 +186,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_dialog = self._build_settings_dialog()
         self._apply_icons()
         self._build_status_bar()
+        self._update_acquisition_mode_widgets()
         self.statusBar().showMessage("就绪")
 
     @staticmethod
@@ -267,7 +267,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sidebar = QtWidgets.QWidget()
         sidebar.setObjectName("sidebar")
         sidebar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        sidebar.setFixedWidth(380)
+        sidebar.setFixedWidth(460)
         outer = QtWidgets.QVBoxLayout(sidebar)
         outer.setContentsMargins(0, 0, 0, 0)
         tabs = QtWidgets.QTabWidget()
@@ -354,7 +354,7 @@ class MainWindow(QtWidgets.QMainWindow):
             form.addRow("波形", self._segmented(wave))
             form.addRow("频率", frequency)
             form.addRow("幅度", amplitude)
-            form.addRow("增益档", self._segmented(mode, ["低压", "高压"]))
+            form.addRow("增益档", self._segmented(mode, ["低", "高"]))
             layout.addWidget(channel_group)
         self.apply_generator_button = self._styled(
             QtWidgets.QPushButton("输出两通道波形"), kind="primary")
@@ -482,7 +482,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_acquisition_button = QtWidgets.QPushButton("应用采集参数")
         trigger_form.addRow(self.apply_acquisition_button)
         outer.addWidget(trigger)
-        self._update_acquisition_mode_widgets()
         return container
 
     def _build_settings_dialog(self) -> QtWidgets.QDialog:
@@ -554,7 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.dac_measured_spins.append(measured)
             self.dac_calibration_labels.append(calibration_label)
             # 与信号源页共用同一个增益档模型，两处切换始终同步。
-            form.addRow("增益档", self._segmented(self.dac_mode_boxes[channel - 1], ["低压", "高压"]))
+            form.addRow("增益档", self._segmented(self.dac_mode_boxes[channel - 1], ["低", "高"]))
             row = QtWidgets.QHBoxLayout()
             row.addWidget(measured, 1)
             row.addWidget(calibrate)
@@ -630,7 +629,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_combo.setVisible(False)
         self.note_edit.setVisible(False)
         self.save_button.setVisible(False)
-        # 信息条：仿台式示波器屏幕上沿，显示通道刻度、时基和触发。
+        # 通道、时基和触发信息并排显示在波形上方。
         info = QtWidgets.QHBoxLayout()
         info.setSpacing(8)
         self.ch1_badge = self._styled(QtWidgets.QLabel(), role="chip")
@@ -662,9 +661,11 @@ class MainWindow(QtWidgets.QMainWindow):
         screen_layout.addWidget(self.plot_widget)
         layout.addWidget(screen, 1)
         # 测量卡片：每通道一张，四项读数用大号等宽字体。
-        self.measurement_labels = [
-            self._styled(QtWidgets.QLabel("—"), role="value") for _ in range(8)
-        ]
+        self.measurement_labels = []
+        for _ in range(8):
+            value = self._styled(QtWidgets.QLabel("—"), role="value")
+            value.setWordWrap(True)
+            self.measurement_labels.append(value)
         cards = QtWidgets.QHBoxLayout()
         cards.setSpacing(12)
         for channel in (1, 2):
@@ -672,11 +673,13 @@ class MainWindow(QtWidgets.QMainWindow):
             card.setObjectName(f"ch{channel}Card")
             grid = QtWidgets.QGridLayout(card)
             grid.setContentsMargins(0, 0, 0, 0)
-            grid.setVerticalSpacing(2)
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(4)
             for i, title in enumerate(("最小值", "最大值", "峰峰值", "频率")):
-                grid.addWidget(self._styled(QtWidgets.QLabel(title), role="caption"), 0, i)
-                grid.addWidget(self.measurement_labels[(channel - 1) * 4 + i], 1, i)
-                grid.setColumnStretch(i, 1)
+                row, column = divmod(i, 2)
+                grid.addWidget(self._styled(QtWidgets.QLabel(title), role="caption"), row * 2, column)
+                grid.addWidget(self.measurement_labels[(channel - 1) * 4 + i], row * 2 + 1, column)
+                grid.setColumnStretch(column, 1)
             cards.addWidget(card)
         layout.addLayout(cards)
         records = QtWidgets.QGroupBox("SQLite 记录与回放")
@@ -705,13 +708,13 @@ class MainWindow(QtWidgets.QMainWindow):
             (2, self.ch2_badge, self.ch2_vdiv_combo, self.ch2_position_spin),
         ):
             active = mode == ChannelDisplayMode.BOTH or int(mode) == channel
-            badge.setText(f"CH{channel}  {combo.currentText()}  {position.value():+.2f} div"
+            badge.setText(f"CH{channel} {combo.currentText().replace(' ', '')} {position.value():+.2f}"
                           if active else f"CH{channel}  OFF")
             badge.setEnabled(active)
-        self.timebase_badge.setText(f"H  {self.timebase_combo.currentText()}")
+        self.timebase_badge.setText(self.timebase_combo.currentText().replace(" ", ""))
         edge = "↑" if self.trigger_edge.currentIndex() == 0 else "↓"
         self.trigger_badge.setText(
-            f"T  CH{self.trigger_source.currentIndex() + 1} {edge} {self.threshold_spin.value()}")
+            f"CH{self.trigger_source.currentIndex() + 1} {edge} {self.threshold_spin.value()}")
 
     def _make_cal_row(self, channel: int) -> QtWidgets.QHBoxLayout:
         spin = QtWidgets.QDoubleSpinBox()
@@ -965,22 +968,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_mode_combo.setEnabled(not self._sampling_mode and not self._mode_switching)
         self.plot_widget.set_channel_mode(self.channel_mode_combo.currentData())
         self._update_channel_controls()
+        self._clear_measurement_labels()
         # DDR 容量固定；130 MSps 的最长记录约为 451.7 ms。
         self.duration_spin.setMaximum(min(MANUAL_MAX_MS, RAW_MAX_SAMPLES * 1000 // self.sample_rate_hz))
-        self.timebase_combo.blockSignals(True)
+        self._sync_timebase_options()
+        self.run_button.setEnabled(not self._mode_switching)
+        self.capture_button.setEnabled(not self._mode_switching)
+
+    def _sync_timebase_options(self) -> None:
+        """连续采集受 DDR 深度限制；手动回放允许完整显示长记录。"""
+        manual = self._acquisition_mode == AcquisitionMode.MANUAL
+        blocked = self.timebase_combo.blockSignals(True)
         last_enabled = 0
         for index in range(self.timebase_combo.count()):
-            allowed = self.timebase_combo.itemData(index) * 10 * self.sample_rate_hz <= RAW_MAX_SAMPLES
+            allowed = manual or self.timebase_combo.itemData(index) * 10 * self.sample_rate_hz <= RAW_MAX_SAMPLES
             self.timebase_combo.model().item(index).setEnabled(allowed)
             if allowed:
                 last_enabled = index
         if self.timebase_combo.currentIndex() > last_enabled:
             self.timebase_combo.setCurrentIndex(last_enabled)
-        self.timebase_combo.blockSignals(False)
+        self.timebase_combo.blockSignals(blocked)
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
         self._update_scope_badges()
-        self.run_button.setEnabled(not self._mode_switching)
-        self.capture_button.setEnabled(not self._mode_switching)
 
     def _fail_mode_switch(self, message: str) -> None:
         self._mode_retry.stop()
@@ -1104,6 +1113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sampling_mode_combo.setEnabled(self._uart_connected and self._interleave_supported and not self._manual_busy and not self._mode_switching)
         self.capture_button.setEnabled(manual and not self._manual_busy)
         self.duration_spin.setEnabled(manual and not self._manual_busy)
+        self._sync_timebase_options()
 
     def _start_manual_capture(self) -> None:
         if self._mode_switching:
@@ -1292,6 +1302,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._square_amplitude_time = 0.0
         self._displayed_measurement = None
         self._measurement_filter.reset()
+        self._clear_measurement_labels()
+
+    def _clear_measurement_labels(self) -> None:
+        mask = self._channel_mask()
+        states = []
+        for channel in (1, 2):
+            active = bool(mask & (1 << (channel - 1)))
+            states.append("—" if active else "未启用")
+            for label in self.measurement_labels[(channel - 1) * 4:channel * 4]:
+                label.setText(states[-1])
+        self._set_status("otr", "/".join(states))
 
     def _update_square_amplitude(self, frame: CompletedFrame) -> None:
         # 每帧重建。显示无法整形时仍可用平台电平；非方波不能沿用上一帧。
@@ -1436,7 +1457,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_adc_calibration(self) -> None:
         for channel in (1, 2):
             self.plot_widget.set_adc_calibration(
-                channel, self._adc_gain[channel], self._adc_offset[channel],
+                channel, self._adc_gain[channel],
+                self._adc_offset[channel] + fixed_dc_offset_v(channel, self._adc_gain[channel]),
             )
 
     def _render_measurement(self, measurement: Measurement, channel_mask: int) -> None:

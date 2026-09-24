@@ -54,7 +54,9 @@ class InterleaveTest(unittest.TestCase):
                     self.assertEqual(w._channel_mask(),1 if mode else 3)
                     self.assertEqual(w.channel_mode_combo.isEnabled(),not bool(mode))
                     self.assertEqual(w.duration_spin.maximum(),451 if mode else 900)
-                    self.assertEqual(w.timebase_combo.model().item(w.timebase_combo.count()-1).isEnabled(),not bool(mode))
+                    # 50 ms/div 仅双通道连续采集可用；100 ms/div 留给手动记录。
+                    self.assertEqual(w.timebase_combo.model().item(w.timebase_combo.findText("50 ms/div")).isEnabled(),not bool(mode))
+                    self.assertFalse(w.timebase_combo.model().item(w.timebase_combo.findText("100 ms/div")).isEnabled())
                     w._apply_acquisition()
                     payload=next(c.args[1] for c in reversed(w.serial_link.send_command.call_args_list)
                                  if c.args[0]==Command.SET_ACQUISITION)

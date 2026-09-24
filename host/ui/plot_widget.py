@@ -19,8 +19,8 @@ from host.comm.data_protocol import (
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
 from host.ui.theme import CH1_COLOR, CH2_COLOR, GRID_COLOR, PLOT_BACKGROUND
 from host.core.waveform import (
-    codes_to_voltage, fft_spectrum, fixed_dc_offset_v,
-    idealize_square_display, refine_trigger_position, smooth_continuous_display,
+    codes_to_voltage, fft_spectrum, idealize_square_display,
+    refine_trigger_position, smooth_continuous_display,
 )
 
 
@@ -69,12 +69,6 @@ class PlotWidget(QtWidgets.QWidget):
         for line in (self.center_level_line, self.center_time_line):
             line.setZValue(-5)
             self.plot.addItem(line)
-
-        self.trigger_line = pg.InfiniteLine(
-            angle=90, movable=False,
-            pen=pg.mkPen("#ff8a3d", width=1, style=pg.QtCore.Qt.DashLine),
-        )
-        self.plot.addItem(self.trigger_line)
 
         self.curve_a = self.plot.plot(
             pen=pg.mkPen(CH1_COLOR, width=1.5), name="CH1", antialias=True,
@@ -206,7 +200,7 @@ class PlotWidget(QtWidgets.QWidget):
         return codes_to_voltage(
             codes,
             gain=gain,
-            offset_v=self._adc_offset[channel] + fixed_dc_offset_v(channel, gain),
+            offset_v=self._adc_offset[channel],
         )
 
     def set_smoothing_start_frequency(self, channel: int, frequency_hz: float) -> None:
@@ -366,7 +360,6 @@ class PlotWidget(QtWidgets.QWidget):
                 display_x, display_y, max_points, square=ideal is not None,
             )
             curve.setData(display_x, self._to_divisions(display_y, channel), connect=connect)
-        self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
     def _display_envelope(self, frame: CompletedFrame) -> None:
@@ -438,7 +431,6 @@ class PlotWidget(QtWidgets.QWidget):
                 else:
                     minimum.clear()
                     maximum.clear()
-        self.trigger_line.setValue(0.0)
         self._apply_visibility()
 
     def _envelope_trigger_offset(
@@ -468,7 +460,6 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
         self.curve_a.setData(fa, ma, connect="all")
         self.curve_b.setData(fb, mb, connect="all")
-        self.trigger_line.setVisible(False)
         if fa.size:
             self.plot.setXRange(0, sample_rate_hz / 2, padding=0)
         self._apply_visibility()
@@ -580,7 +571,6 @@ class PlotWidget(QtWidgets.QWidget):
             for curve in (self.min_a, self.max_a, self.min_b, self.max_b,
                           self.fill_a, self.fill_b):
                 curve.setVisible(False)
-            self.trigger_line.setVisible(False)
             return
         self.curve_a.setVisible(ch1_visible)
         self.curve_b.setVisible(ch2_visible)
@@ -588,7 +578,6 @@ class PlotWidget(QtWidgets.QWidget):
             curve.setVisible(ch1_visible and 1 in self._envelope_channels)
         for curve in (self.min_b, self.max_b, self.fill_b):
             curve.setVisible(ch2_visible and 2 in self._envelope_channels)
-        self.trigger_line.setVisible(True)
 
     @staticmethod
     def _validate_channel(channel: int) -> int:

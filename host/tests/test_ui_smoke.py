@@ -19,6 +19,7 @@ from math import ceil
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.comm.control_protocol import Command, DataMode
 from host.config import ADC_SAMPLE_RATE_HZ, PC_IP, UART_BAUD, UDP_PORT
+from host.core.waveform import fixed_dc_offset_v
 from host.tests.window_helpers import create_window
 from host.tests.waveform_helpers import square_with_overshoot
 from host.ui.main_window import RAW_MAX_SAMPLES, TIME_PER_DIV
@@ -56,7 +57,8 @@ class UiSmokeTest(unittest.TestCase):
                 self.assertGreater(window._last_measurement.min_a, int(codes.min()))
                 self.assertAlmostEqual(window._last_measurement.vpp_a / 4095 * 10, 2.0, delta=0.02)
                 corrected = window.plot_widget.curve_a.getData()[1].copy()
-                self.assertLess(float(corrected.max()), 2.05)  # 500 mV/div 下平台为 2 格。
+                # CH1 的固定直流补偿也会体现在绘制的纵向格数里。
+                self.assertLess(float(corrected.max()), 2.05 + fixed_dc_offset_v(1) / 0.5)
                 self.assertFalse(hasattr(window, "edge_overshoot_checkbox"))
                 self.assertFalse(hasattr(window, "waveform_display_combo"))
                 self.assertEqual([label.text() for label in window.measurement_labels], measured)
@@ -403,6 +405,30 @@ class UiSmokeTest(unittest.TestCase):
             send.assert_not_called()
             window.close()
             self.app.processEvents()
+
+    def test_manual_record_longer_than_half_second_fits_the_display(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "manual-long.db")
+            try:
+                self.assertFalse(window.timebase_combo.model().item(window.timebase_combo.count() - 1).isEnabled())
+                window.acquisition_mode_combo.setCurrentText("手动")
+                codes = np.full(900, 2048, dtype="<u2")
+                frame = CompletedFrame(
+                    PacketHeader(1, 1, 4, 900, 1000, 0, 1,
+                                 SampleFormat.RAW16, 0, 0, codes.nbytes, 0),
+                    codes.tobytes(),
+                )
+                window._fit_timebase_to_record(frame)
+                window.plot_widget.display_frame(frame)
+                self.assertEqual(window.timebase_combo.currentText(), "100 ms/div")
+                self.assertEqual(window.plot_widget.plot.viewRange()[0], [0.0, 1.0])
+                self.assertAlmostEqual(float(window.plot_widget.curve_a.getData()[0][-1]), 0.899)
+                window.acquisition_mode_combo.setCurrentText("连续")
+                self.assertEqual(window.timebase_combo.currentText(), "50 ms/div")
+                self.assertFalse(window.timebase_combo.model().item(window.timebase_combo.count() - 1).isEnabled())
+            finally:
+                window.close()
+                self.app.processEvents()
 
     def test_manual_raw_frame_updates_measurements(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

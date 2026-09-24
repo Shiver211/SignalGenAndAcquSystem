@@ -86,8 +86,6 @@ class PlotWidgetTest(unittest.TestCase):
                                            sample_rate=1_000, trigger_index=1))
             x = widget.curve_a.getData()[0]
             np.testing.assert_allclose(x, [-1e-3, 0.0, 1e-3])
-            self.assertAlmostEqual(widget.trigger_line.value(), 0.0)
-            self.assertTrue(widget.trigger_line.isVisible())
             self.assertEqual(widget.plot.viewRange()[0], [-5e-3, 5e-3])
         finally:
             widget.close()
@@ -111,7 +109,6 @@ class PlotWidgetTest(unittest.TestCase):
                                    expected_b)
             self.assertTrue(widget.curve_a.isVisible())
             self.assertTrue(widget.curve_b.isVisible())
-            self.assertTrue(widget.trigger_line.isVisible())
             self.assertTrue(widget.min_a.isVisible())
             self.assertTrue(widget.max_a.isVisible())
             self.assertTrue(widget.fill_a.isVisible())

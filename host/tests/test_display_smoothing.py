@@ -10,11 +10,13 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
 from host.config import ADC_SAMPLE_RATE_HZ
-from host.core.waveform import codes_to_voltage, fft_spectrum, smooth_continuous_display
+from host.core.waveform import (
+    codes_to_voltage, fft_spectrum, fixed_dc_offset_v, smooth_continuous_display,
+)
 from host.tests.window_helpers import create_window
 from host.ui.plot_widget import ChannelDisplayMode, PlotWidget
 
@@ -241,7 +243,9 @@ class SmoothingFrequencyControlsTest(unittest.TestCase):
     def test_gui_changes_apply_immediately_and_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "smoothing.db"
-            window = create_window(database)
+            settings = QtCore.QSettings(str(database.with_suffix(".ini")), QtCore.QSettings.IniFormat)
+            settings.setValue("adc_cal/ch1_offset", -fixed_dc_offset_v(1))
+            window = create_window(database, settings=settings)
             window.status_timer.stop()
             signal = np.sin(2 * np.pi * np.arange(650) * 400_000 / ADC_SAMPLE_RATE_HZ)
             signal += np.random.default_rng(21).normal(0, 0.012, len(signal))

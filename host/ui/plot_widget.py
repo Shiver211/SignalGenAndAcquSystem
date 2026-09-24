@@ -17,6 +17,7 @@ from host.comm.data_protocol import (
     INTERLEAVE_FLAG, CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
+from host.ui.theme import CH1_COLOR, CH2_COLOR, GRID_COLOR, PLOT_BACKGROUND
 from host.core.waveform import (
     codes_to_voltage, fft_spectrum, fixed_dc_offset_v,
     idealize_square_display, refine_trigger_position, smooth_continuous_display,
@@ -46,7 +47,7 @@ class PlotWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
 
-        self.plot = pg.PlotWidget(background="#10151d")
+        self.plot = pg.PlotWidget(background=PLOT_BACKGROUND)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showGrid(x=False, y=False)
@@ -59,32 +60,39 @@ class PlotWidget(QtWidgets.QWidget):
         # 不画刻度数字，只保留格线。
         self.grid_item = pg.GridItem()
         self.grid_item.setTextPen(None)
+        self.grid_item.setPen(pg.mkPen(GRID_COLOR, width=1, style=pg.QtCore.Qt.DotLine))
         self.plot.addItem(self.grid_item)
+        # 中心十字轴线，便于读取格数；竖线随时间窗保持在屏幕中央。
+        axis_pen = pg.mkPen(120, 136, 156, 150, width=1)
+        self.center_level_line = pg.InfiniteLine(pos=0, angle=0, movable=False, pen=axis_pen)
+        self.center_time_line = pg.InfiniteLine(pos=0, angle=90, movable=False, pen=axis_pen)
+        for line in (self.center_level_line, self.center_time_line):
+            line.setZValue(-5)
+            self.plot.addItem(line)
 
         self.trigger_line = pg.InfiniteLine(
             angle=90, movable=False,
-            pen=pg.mkPen("#d6d6d6", width=1, style=pg.QtCore.Qt.DashLine),
+            pen=pg.mkPen("#ff8a3d", width=1, style=pg.QtCore.Qt.DashLine),
         )
         self.plot.addItem(self.trigger_line)
 
-        self.plot.addLegend()
         self.curve_a = self.plot.plot(
-            pen=pg.mkPen("#3da5ff", width=1.5), name="CH1", antialias=True,
+            pen=pg.mkPen(CH1_COLOR, width=1.5), name="CH1", antialias=True,
         )
         self.curve_b = self.plot.plot(
-            pen=pg.mkPen("#ffb020", width=1.5), name="CH2", antialias=True,
+            pen=pg.mkPen(CH2_COLOR, width=1.5), name="CH2", antialias=True,
         )
 
         # 包络帧同时保留每桶的 Min/Max，避免把桶内瞬态压成一个中心点。
-        self.min_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1), antialias=True)
-        self.max_a = self.plot.plot(pen=pg.mkPen("#3da5ff", width=1), antialias=True)
-        self.min_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1), antialias=True)
-        self.max_b = self.plot.plot(pen=pg.mkPen("#ffb020", width=1), antialias=True)
+        self.min_a = self.plot.plot(pen=pg.mkPen(CH1_COLOR, width=1), antialias=True)
+        self.max_a = self.plot.plot(pen=pg.mkPen(CH1_COLOR, width=1), antialias=True)
+        self.min_b = self.plot.plot(pen=pg.mkPen(CH2_COLOR, width=1), antialias=True)
+        self.max_b = self.plot.plot(pen=pg.mkPen(CH2_COLOR, width=1), antialias=True)
         self.fill_a = pg.FillBetweenItem(
-            self.min_a, self.max_a, pg.mkBrush(61, 165, 255, 45),
+            self.min_a, self.max_a, pg.mkBrush(245, 213, 71, 40),
         )
         self.fill_b = pg.FillBetweenItem(
-            self.min_b, self.max_b, pg.mkBrush(255, 176, 32, 35),
+            self.min_b, self.max_b, pg.mkBrush(61, 219, 217, 35),
         )
         self.plot.addItem(self.fill_a)
         self.plot.addItem(self.fill_b)
@@ -481,6 +489,7 @@ class PlotWidget(QtWidgets.QWidget):
         else:
             left = 0.0
             right = self.HORIZONTAL_DIVISIONS * self._seconds_per_div
+        self.center_time_line.setValue((left + right) / 2)
         self.plot.setXRange(left, right, padding=0)
         self.plot.setYRange(-self._HALF_VERTICAL_DIVISIONS,
                             self._HALF_VERTICAL_DIVISIONS, padding=0)

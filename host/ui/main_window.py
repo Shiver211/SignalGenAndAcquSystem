@@ -36,6 +36,9 @@ from host.core.waveform import (
 )
 from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, DEFAULT_SMOOTHING_START_HZ, PlotWidget
+from host.ui.icons import ICON_ON_ACCENT, icon
+from host.ui.segmented import SegmentedControl
+from host.ui.theme import CH1_COLOR, CH2_COLOR, PLOT_BACKGROUND, STYLE_SHEET, set_led
 
 
 class AcquisitionMode(IntEnum):
@@ -59,6 +62,8 @@ TIME_PER_DIV = (
     # UI 显示的十格时间窗超过 FPGA 实际可采集深度。
 )
 DAC_GAIN_MODES = ("low", "high")
+STATUS_OK = {"已连接", "已校准", "锁定", "正常", "就绪", "空闲", "ARM"}
+STATUS_BAD = {"断开", "未校准", "未锁定", "异常", "溢出", "未就绪"}
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -121,65 +126,211 @@ class MainWindow(QtWidgets.QMainWindow):
         if auto_connect:
             QtCore.QTimer.singleShot(0, self._auto_connect)
 
+    @property
+    def _continuous_running(self) -> bool:
+        return self._running
+
+    @_continuous_running.setter
+    def _continuous_running(self, running: bool) -> None:
+        self._running = bool(running)
+        if hasattr(self, "run_button"):
+            self._update_run_button()
+
+    def _update_run_button(self) -> None:
+        running = self._continuous_running
+        self.run_button.setText("停止" if running else "运行")
+        self.run_button.setIcon(icon("stop" if running else "play", ICON_ON_ACCENT))
+        self.run_button.setToolTip("停止连续采集" if running else "开始连续采集")
+        self._styled(self.run_button, kind="stop" if running else "run")
+        self.run_button.style().unpolish(self.run_button)
+        self.run_button.style().polish(self.run_button)
+
+    def _toggle_run(self) -> None:
+        if self._continuous_running:
+            self._stop_acquisition()
+        else:
+            self._run_acquisition()
+
+    def _apply_icons(self) -> None:
+        for button, name, color in (
+            (self.refresh_port_button, "refresh", None),
+            (self.uart_button, "link", ICON_ON_ACCENT),
+            (self.udp_button, "network", ICON_ON_ACCENT),
+            (self.apply_generator_button, "output", ICON_ON_ACCENT),
+            (self.dac_test_button, "send", ICON_ON_ACCENT),
+            (self.apply_acquisition_button, "check", None),
+            *((self.calibrate_buttons[ch], "target", None) for ch in (1, 2)),
+            *((self.reset_cal_buttons[ch], "reset", None) for ch in (1, 2)),
+        ):
+            button.setIcon(icon(name, color) if color else icon(name))
+            button.setIconSize(QtCore.QSize(15, 15))
+        for index, name in enumerate(("target", "target", "sliders")):
+            self.settings_tabs.setTabIcon(index, icon(name))
+        self.settings_tabs.setIconSize(QtCore.QSize(16, 16))
+
     def _build_ui(self) -> None:
-        splitter = QtWidgets.QSplitter()
-        splitter.addWidget(self._build_control_panel())
-        splitter.addWidget(self._build_display_panel())
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([520, 960])
-        self.setCentralWidget(splitter)
+        self.setStyleSheet(STYLE_SHEET)
+        sidebar = self._build_control_panel()
+        display = self._build_display_panel()
+        body = QtWidgets.QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(sidebar)
+        body.addWidget(display, 1)
+        root = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_header())
+        layout.addLayout(body, 1)
+        self.setCentralWidget(root)
+        self.settings_dialog = self._build_settings_dialog()
+        self._apply_icons()
+        self._build_status_bar()
         self.statusBar().showMessage("就绪")
 
-    def _build_control_panel(self) -> QtWidgets.QWidget:
-        panel = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(panel)
-        layout.addWidget(self._connection_group())
-        # DAC 波形控制属于基础联调功能，始终显示在采集控制上方。
-        generator = self._generator_group()
-        layout.addWidget(generator)
-        layout.addWidget(self._acquisition_group())
-        layout.addWidget(self._device_status_group())
-        layout.addStretch(1)
+    @staticmethod
+    def _styled(widget: QtWidgets.QWidget, **properties: str) -> QtWidgets.QWidget:
+        for name, value in properties.items():
+            widget.setProperty(name, value)
+        return widget
+
+    @staticmethod
+    def _hint(text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setWordWrap(True)
+        label.setProperty("role", "hint")
+        return label
+
+    @staticmethod
+    def _form(group: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
+        form = QtWidgets.QFormLayout(group)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        return form
+
+    def _segmented(self, combo: QtWidgets.QComboBox, labels: list[str] | None = None) -> SegmentedControl:
+        return SegmentedControl(combo, self, labels)
+
+    def _build_header(self) -> QtWidgets.QWidget:
+        """顶部工具条：标题 + 运行控制，采集状态一眼可见。"""
+        header = QtWidgets.QWidget()
+        header.setObjectName("header")
+        header.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        header.setFixedHeight(60)
+        row = QtWidgets.QHBoxLayout(header)
+        row.setContentsMargins(12, 0, 16, 0)
+        row.setSpacing(10)
+        # 左上角设置入口：校准与显示平滑等低频配置集中在设置窗口。
+        self.settings_button = QtWidgets.QToolButton()
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.setIcon(icon("settings"))
+        self.settings_button.setIconSize(QtCore.QSize(20, 20))
+        self.settings_button.setFixedSize(38, 38)
+        self.settings_button.setToolTip("设置：DAC/ADC 校准、显示平滑")
+        self.settings_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.settings_button.clicked.connect(self._show_settings)
+        row.addWidget(self.settings_button)
+        row.addSpacing(4)
+        titles = QtWidgets.QVBoxLayout()
+        titles.setSpacing(0)
+        title = QtWidgets.QLabel("Signal Studio")
+        title.setObjectName("appTitle")
+        subtitle = QtWidgets.QLabel("FPGA 信号发生与采集系统")
+        subtitle.setObjectName("appSubtitle")
+        titles.addStretch(1)
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        titles.addStretch(1)
+        row.addLayout(titles)
+        row.addStretch(1)
+        row.addWidget(self.capture_progress)
+        row.addWidget(self.acquisition_mode_segment)
+        row.addSpacing(6)
+        row.addWidget(self.run_button)
+        row.addWidget(self.capture_button)
+        return header
+
+    @staticmethod
+    def _scrolled(widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(panel)
+        scroll.setWidget(widget)
         return scroll
+
+    def _build_control_panel(self) -> QtWidgets.QWidget:
+        sidebar = QtWidgets.QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        sidebar.setFixedWidth(380)
+        outer = QtWidgets.QVBoxLayout(sidebar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        # 示波器页放第一位：日常最常用；信号源与连接各占一页，避免长滚动。
+        pages = (
+            ("示波器", "scope", (self._acquisition_group,)),
+            ("信号源", "wave", (self._generator_group,)),
+            ("连接", "plug", (self._connection_group,)),
+        )
+        tabs.setIconSize(QtCore.QSize(16, 16))
+        for title, icon_name, builders in pages:
+            page = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(page)
+            layout.setContentsMargins(14, 6, 10, 14)
+            layout.setSpacing(12)
+            for build in builders:
+                layout.addWidget(build())
+            layout.addStretch(1)
+            tabs.addTab(self._scrolled(page), icon(icon_name), title)
+        outer.addWidget(tabs)
+        self.control_tabs = tabs
+        return sidebar
 
     def _connection_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("连接")
-        form = QtWidgets.QGridLayout(group)
+        form = self._form(group)
         self.port_combo = QtWidgets.QComboBox()
         self.baud_combo = QtWidgets.QComboBox()
         self.baud_combo.addItems([str(UART_BAUD), "460800", "115200"])
-        self.uart_button = QtWidgets.QPushButton("连接 UART")
-        self.refresh_port_button = QtWidgets.QPushButton("刷新")
+        self.uart_button = self._styled(QtWidgets.QPushButton("连接 UART"), kind="primary")
+        self.refresh_port_button = self._styled(QtWidgets.QPushButton("刷新"), kind="ghost")
         self.udp_bind_edit = QtWidgets.QLineEdit(PC_IP)
         self.udp_port_spin = QtWidgets.QSpinBox()
         self.udp_port_spin.setRange(1, 65535)
         self.udp_port_spin.setValue(UDP_PORT)
-        self.udp_button = QtWidgets.QPushButton("启动 UDP")
-        form.addWidget(QtWidgets.QLabel("串口"), 0, 0)
-        form.addWidget(self.port_combo, 0, 1)
-        form.addWidget(self.refresh_port_button, 0, 2)
-        form.addWidget(QtWidgets.QLabel("波特率"), 1, 0)
-        form.addWidget(self.baud_combo, 1, 1)
-        form.addWidget(self.uart_button, 1, 2)
-        form.addWidget(QtWidgets.QLabel("UDP 绑定"), 2, 0)
-        form.addWidget(self.udp_bind_edit, 2, 1)
-        form.addWidget(self.udp_port_spin, 2, 2)
-        form.addWidget(self.udp_button, 3, 1, 1, 2)
+        self.udp_port_spin.setFixedWidth(84)
+        self.udp_button = self._styled(QtWidgets.QPushButton("启动 UDP"), kind="primary")
+        port_row = QtWidgets.QHBoxLayout()
+        port_row.addWidget(self.port_combo, 1)
+        port_row.addWidget(self.refresh_port_button)
+        udp_row = QtWidgets.QHBoxLayout()
+        udp_row.addWidget(self.udp_bind_edit, 1)
+        udp_row.addWidget(self.udp_port_spin)
+        form.addRow("串口", port_row)
+        form.addRow("波特率", self.baud_combo)
+        form.addRow(self.uart_button)
+        form.addRow("UDP", udp_row)
+        form.addRow(self.udp_button)
         return group
 
     def _generator_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("DAC 波形控制")
         layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         self.wave_boxes, self.frequency_spins, self.amplitude_spins = [], [], []
         self.dac_mode_boxes, self.dac_measured_spins = [], []
         self.dac_calibration_labels = []
         for channel in range(2):
-            channel_group = QtWidgets.QGroupBox(f"CH{channel + 1}")
-            grid = QtWidgets.QGridLayout(channel_group)
+            channel_group = QtWidgets.QGroupBox(f"●  CH{channel + 1}")
+            channel_group.setObjectName(f"ch{channel + 1}Card")
+            form = self._form(channel_group)
             wave = QtWidgets.QComboBox()
             wave.addItems(["正弦", "三角", "方波"])
             frequency = QtWidgets.QDoubleSpinBox()
@@ -196,52 +347,38 @@ class MainWindow(QtWidgets.QMainWindow):
             amplitude.setValue(0.1)
             amplitude.setSuffix(" Vpp")
             amplitude.setSpecialValueText("关闭")
-            measured = QtWidgets.QDoubleSpinBox()
-            measured.setRange(0, 10)
-            measured.setDecimals(3)
-            measured.setSuffix(" Vpp")
-            calibration_label = QtWidgets.QLabel()
-            calibrate = QtWidgets.QPushButton(f"保存 CH{channel + 1} 当前档标定")
-            calibrate.clicked.connect(
-                lambda _checked=False, ch=channel + 1: self._calibrate_dac_amplitude(ch)
-            )
             self.wave_boxes.append(wave)
             self.frequency_spins.append(frequency)
             self.dac_mode_boxes.append(mode)
             self.amplitude_spins.append(amplitude)
-            self.dac_measured_spins.append(measured)
-            self.dac_calibration_labels.append(calibration_label)
-            for row, title, widget in (
-                (0, "波形", wave), (1, "频率", frequency),
-                (2, "手动增益档", mode), (3, "目标幅度", amplitude),
-                (4, "示波器实测", measured),
-            ):
-                grid.addWidget(QtWidgets.QLabel(title), row, 0)
-                grid.addWidget(widget, row, 1)
-            grid.addWidget(calibrate, 5, 0, 1, 2)
-            grid.addWidget(calibration_label, 6, 0, 1, 2)
-            self._update_dac_calibration_label(channel + 1)
+            form.addRow("波形", self._segmented(wave))
+            form.addRow("频率", frequency)
+            form.addRow("幅度", amplitude)
+            form.addRow("增益档", self._segmented(mode, ["低压", "高压"]))
             layout.addWidget(channel_group)
-        self.dac_test_button = QtWidgets.QPushButton("发送 1 kHz / 25% 标定波形（双通道）")
-        layout.addWidget(self.dac_test_button)
-        self.apply_generator_button = QtWidgets.QPushButton("原子提交两通道参数")
+        self.apply_generator_button = self._styled(
+            QtWidgets.QPushButton("输出两通道波形"), kind="primary")
+        self.apply_generator_button.setMinimumHeight(38)
         layout.addWidget(self.apply_generator_button)
-        hint = QtWidgets.QLabel("切档请旋到已标定端点：CH1 高档顺时针，CH2 高档逆时针；低档相反。端点以外的位置需重新标定。")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout.addWidget(self._hint(
+            "切档请旋到已标定端点：CH1 高档顺时针，CH2 高档逆时针；低档相反。"
+            "档位标定在左上角「设置」中完成。"))
         return group
 
-    def _acquisition_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("采集与显示")
-        form = QtWidgets.QFormLayout(group)
+    def _acquisition_group(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
         self.acquisition_mode_combo = QtWidgets.QComboBox()
         self.acquisition_mode_combo.addItem("连续", AcquisitionMode.CONTINUOUS)
         self.acquisition_mode_combo.addItem("手动", AcquisitionMode.MANUAL)
+        self.acquisition_mode_segment = self._segmented(self.acquisition_mode_combo)
+        self.acquisition_mode_segment.setFixedSize(150, 38)
         self.sampling_mode_combo = QtWidgets.QComboBox()
         self.sampling_mode_combo.addItems(["双通道 65 MSps", "INA 交织 130 MSps"])
         self.sampling_mode_combo.setEnabled(False)
-        self.sampling_hint = QtWidgets.QLabel("双通道：跳帽 B–C")
-        self.sampling_hint.setWordWrap(True)
+        self.sampling_hint = self._hint("双通道：跳帽 B–C")
         self.channel_mode_combo = QtWidgets.QComboBox()
         self.channel_mode_combo.addItem("双通道", ChannelDisplayMode.BOTH)
         self.channel_mode_combo.addItem("CH1", ChannelDisplayMode.CH1)
@@ -294,75 +431,221 @@ class MainWindow(QtWidgets.QMainWindow):
         self.duration_spin.setRange(1, MANUAL_MAX_MS)
         self.duration_spin.setValue(10)
         self.duration_spin.setSuffix(" ms")
-        self.capture_button = QtWidgets.QPushButton("开始采集")
-        self.capture_progress = QtWidgets.QLabel("")
-        form.addRow("采集模式", self.acquisition_mode_combo)
-        form.addRow("采样模式", self.sampling_mode_combo)
-        form.addRow(self.sampling_hint)
-        form.addRow("通道模式", self.channel_mode_combo)
-        form.addRow("CH1 电压", self.ch1_vdiv_combo)
-        form.addRow("CH1 位置", self.ch1_position_spin)
-        form.addRow("CH1 平滑起始频率", self.smoothing_frequency_spins[1])
-        form.addRow("CH2 电压", self.ch2_vdiv_combo)
-        form.addRow("CH2 位置", self.ch2_position_spin)
-        form.addRow("CH2 平滑起始频率", self.smoothing_frequency_spins[2])
-        self._trigger_form_rows = []
-        for label, widget in (
-            ("触发源", self.trigger_source), ("触发边沿", self.trigger_edge),
-            ("阈值码", self.threshold_spin), ("迟滞码", self.hysteresis_spin),
-        ):
-            form.addRow(label, widget)
-            self._trigger_form_rows.append((form.labelForField(widget), widget))
         self.depth_spin.setVisible(False)
         self.pretrigger_spin.setVisible(False)
         self.display_points_spin.setVisible(False)
         self.refresh_spin.setVisible(False)
-        form.addRow("时间基准", self.timebase_combo)
-        self.duration_row_label = QtWidgets.QLabel("采集时长")
+        # 运行按钮放在顶部工具条（_build_header），这里只创建。运行/停止
+        # 合并为一个切换按钮；stop_button 保留为同一对象的别名。
+        self.run_button = QtWidgets.QPushButton()
+        self.run_button.setMinimumWidth(104)
+        self.stop_button = self.run_button
+        self.capture_button = self._styled(QtWidgets.QPushButton("单次采集"), kind="run")
+        self.capture_button.setIcon(icon("capture", ICON_ON_ACCENT))
+        for button in (self.run_button, self.capture_button):
+            button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setIconSize(QtCore.QSize(14, 14))
+        self._update_run_button()
+        self.capture_progress = self._styled(QtWidgets.QLabel(""), role="caption")
+
+        acquisition = QtWidgets.QGroupBox("采集")
+        form = self._form(acquisition)
+        form.addRow("采样", self._segmented(self.sampling_mode_combo, ["65 MSps ×2", "130 MSps 交织"]))
+        form.addRow(self.sampling_hint)
+        form.addRow("通道", self._segmented(self.channel_mode_combo))
+        form.addRow("时基", self.timebase_combo)
+        self.duration_row_label = QtWidgets.QLabel("时长")
         form.addRow(self.duration_row_label, self.duration_spin)
-        self.apply_acquisition_button = QtWidgets.QPushButton("提交采集/处理参数")
-        form.addRow(self.apply_acquisition_button)
-        buttons = QtWidgets.QHBoxLayout()
-        self.run_button = QtWidgets.QPushButton("运行")
-        self.stop_button = QtWidgets.QPushButton("停止")
-        buttons.addWidget(self.run_button)
-        buttons.addWidget(self.stop_button)
-        form.addRow(buttons)
-        form.addRow(self.capture_button)
-        form.addRow(self.capture_progress)
+        outer.addWidget(acquisition)
+
+        for channel, vdiv, position in (
+            (1, self.ch1_vdiv_combo, self.ch1_position_spin),
+            (2, self.ch2_vdiv_combo, self.ch2_position_spin),
+        ):
+            vertical = QtWidgets.QGroupBox(f"●  CH{channel}")
+            vertical.setObjectName(f"ch{channel}Card")
+            vertical_form = self._form(vertical)
+            vertical_form.addRow("刻度", vdiv)
+            vertical_form.addRow("位置", position)
+            outer.addWidget(vertical)
+
+        trigger = QtWidgets.QGroupBox("触发")
+        trigger_form = self._form(trigger)
+        self._trigger_form_rows = []
+        for label, widget in (
+            ("信源", self._segmented(self.trigger_source, ["CH1", "CH2"])),
+            ("边沿", self._segmented(self.trigger_edge, ["↑ 上升", "↓ 下降"])),
+            ("阈值码", self.threshold_spin), ("迟滞码", self.hysteresis_spin),
+        ):
+            trigger_form.addRow(label, widget)
+            self._trigger_form_rows.append((trigger_form.labelForField(widget), widget))
+        self.apply_acquisition_button = QtWidgets.QPushButton("应用采集参数")
+        trigger_form.addRow(self.apply_acquisition_button)
+        outer.addWidget(trigger)
         self._update_acquisition_mode_widgets()
+        return container
+
+    def _build_settings_dialog(self) -> QtWidgets.QDialog:
+        """设置窗口：DAC/ADC 校准与显示平滑。非模态，校准时仍可观察波形。"""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("设置")
+        dialog.setModal(False)
+        dialog.resize(480, 620)
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        for title, build in (
+            ("DAC 校准", self._dac_calibration_page),
+            ("ADC 校准", self._adc_calibration_group),
+            ("显示", self._display_settings_group),
+        ):
+            page = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(page)
+            layout.setContentsMargins(16, 8, 16, 16)
+            layout.setSpacing(12)
+            layout.addWidget(build())
+            layout.addStretch(1)
+            tabs.addTab(self._scrolled(page), title)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(tabs)
+        self.settings_tabs = tabs
+        self._update_channel_controls()
+        return dialog
+
+    def _show_settings(self) -> None:
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
+    def _dac_calibration_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        steps = QtWidgets.QGroupBox("DAC 档位标定")
+        steps_layout = QtWidgets.QVBoxLayout(steps)
+        steps_layout.setContentsMargins(0, 0, 0, 0)
+        steps_layout.setSpacing(10)
+        steps_layout.addWidget(self._hint(
+            "① 选择各通道增益档，并把增益旋钮旋到对应端点\n"
+            "② 发送 1 kHz / 25% 标定波形\n"
+            "③ 用高阻示波器测量峰峰值，填入后保存"))
+        self.dac_test_button = self._styled(
+            QtWidgets.QPushButton("发送 1 kHz / 25% 标定波形（双通道）"), kind="primary")
+        steps_layout.addWidget(self.dac_test_button)
+        layout.addWidget(steps)
+        self.dac_measured_spins = []
+        self.dac_calibration_labels = []
+        for channel in (1, 2):
+            card = QtWidgets.QGroupBox(f"●  CH{channel}")
+            card.setObjectName(f"ch{channel}Card")
+            form = self._form(card)
+            measured = QtWidgets.QDoubleSpinBox()
+            measured.setRange(0, 10)
+            measured.setDecimals(3)
+            measured.setSuffix(" Vpp")
+            calibrate = QtWidgets.QPushButton("保存标定")
+            calibrate.setIcon(icon("save"))
+            calibrate.setIconSize(QtCore.QSize(15, 15))
+            calibrate.clicked.connect(
+                lambda _checked=False, ch=channel: self._calibrate_dac_amplitude(ch)
+            )
+            calibration_label = self._hint("")
+            self.dac_measured_spins.append(measured)
+            self.dac_calibration_labels.append(calibration_label)
+            # 与信号源页共用同一个增益档模型，两处切换始终同步。
+            form.addRow("增益档", self._segmented(self.dac_mode_boxes[channel - 1], ["低压", "高压"]))
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(measured, 1)
+            row.addWidget(calibrate)
+            form.addRow("实测", row)
+            form.addRow(calibration_label)
+            self._update_dac_calibration_label(channel)
+            layout.addWidget(card)
+        return page
+
+    def _adc_calibration_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("ADC 幅度校准")
+        layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.cal_vpp_spins: dict[int, QtWidgets.QDoubleSpinBox] = {}
+        self.calibrate_buttons: dict[int, QtWidgets.QPushButton] = {}
+        self.reset_cal_buttons: dict[int, QtWidgets.QPushButton] = {}
+        layout.addWidget(self._hint("输入已知信号的峰峰值，运行采集后点击校准。"))
+        layout.addLayout(self._make_cal_row(1))
+        layout.addLayout(self._make_cal_row(2))
         return group
 
-    def _device_status_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("设备状态")
-        grid = QtWidgets.QGridLayout(group)
-        self.status_labels: dict[str, QtWidgets.QLabel] = {}
-        names = [
-            ("uart", "UART"), ("phy", "PHY"), ("mig", "MIG"),
-            ("capture", "采集"), ("adc", "ADC 时钟"), ("mmcm", "MMCM"),
-            ("loss", "UDP错/丢帧"), ("otr", "OTR A/B"),
-        ]
-        for index, (key, text) in enumerate(names):
-            label = QtWidgets.QLabel("未知")
-            self.status_labels[key] = label
-            grid.addWidget(QtWidgets.QLabel(text), index // 2, (index % 2) * 2)
-            grid.addWidget(label, index // 2, (index % 2) * 2 + 1)
+    def _display_settings_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("波形显示平滑")
+        form = self._form(group)
+        form.addRow(self._hint("信号频率达到起始频率时启用显示平滑，仅影响显示，修改立即生效并自动保存。"))
+        for channel in (1, 2):
+            label = QtWidgets.QLabel(f"CH{channel} 起始频率")
+            label.setStyleSheet(f"color: {CH1_COLOR if channel == 1 else CH2_COLOR};")
+            form.addRow(label, self.smoothing_frequency_spins[channel])
         return group
+
+    def _build_status_bar(self) -> None:
+        """设备状态以指示灯形式常驻状态栏右侧。"""
+        self.statusBar().setSizeGripEnabled(False)
+        self.status_labels: dict[str, QtWidgets.QLabel] = {}
+        self._status_dots: dict[str, QtWidgets.QLabel] = {}
+        names = [
+            ("uart", "UART"), ("phy", "PHY"), ("mig", "DDR"),
+            ("capture", "采集"), ("adc", "ADC"), ("mmcm", "MMCM"),
+            ("loss", "UDP错/丢"), ("otr", "OTR"),
+        ]
+        for key, text in names:
+            pill = QtWidgets.QWidget()
+            row = QtWidgets.QHBoxLayout(pill)
+            row.setContentsMargins(8, 0, 8, 0)
+            row.setSpacing(5)
+            dot = self._styled(QtWidgets.QLabel("●"), role="led")
+            row.addWidget(dot)
+            row.addWidget(self._styled(QtWidgets.QLabel(text), role="caption"))
+            label = self._styled(QtWidgets.QLabel("未知"), role="led")
+            self.status_labels[key] = label
+            self._status_dots[key] = dot
+            row.addWidget(label)
+            self.statusBar().addPermanentWidget(pill)
+
+    def _set_status(self, key: str, text: str) -> None:
+        label = self.status_labels[key]
+        label.setText(text)
+        state = "ok" if text in STATUS_OK else "bad" if text in STATUS_BAD else None
+        set_led(label, state)
+        set_led(self._status_dots[key], state)
 
     def _build_display_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
-        toolbar = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(12)
         self.analysis_combo = QtWidgets.QComboBox(); self.analysis_combo.addItems(["时域", "FFT"])
         self.save_button = QtWidgets.QPushButton("保存当前帧")
         self.note_edit = QtWidgets.QLineEdit(); self.note_edit.setPlaceholderText("记录备注")
-        toolbar.addWidget(QtWidgets.QLabel("波形显示（10 × 8 div）"))
-        toolbar.addStretch(1)
         # FFT、记录/回放属于后续高级功能，保留对象和槽函数但不放入主布局。
         self.analysis_combo.setVisible(False)
         self.note_edit.setVisible(False)
         self.save_button.setVisible(False)
-        layout.addLayout(toolbar)
+        # 信息条：仿台式示波器屏幕上沿，显示通道刻度、时基和触发。
+        info = QtWidgets.QHBoxLayout()
+        info.setSpacing(8)
+        self.ch1_badge = self._styled(QtWidgets.QLabel(), role="chip")
+        self.ch2_badge = self._styled(QtWidgets.QLabel(), role="chip")
+        self.timebase_badge = self._styled(QtWidgets.QLabel(), role="chip")
+        self.trigger_badge = self._styled(QtWidgets.QLabel(), role="chip")
+        self.ch1_badge.setStyleSheet(f"color: {CH1_COLOR};")
+        self.ch2_badge.setStyleSheet(f"color: {CH2_COLOR};")
+        self.trigger_badge.setStyleSheet("color: #ff9f5a;")
+        info.addWidget(self.ch1_badge)
+        info.addWidget(self.ch2_badge)
+        info.addStretch(1)
+        info.addWidget(self.timebase_badge)
+        info.addWidget(self.trigger_badge)
+        layout.addLayout(info)
         self.plot_widget = PlotWidget()
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
         self.plot_widget.set_volts_per_div(1, float(self.ch1_vdiv_combo.currentData()))
@@ -370,23 +653,32 @@ class MainWindow(QtWidgets.QMainWindow):
         for channel, spin in self.smoothing_frequency_spins.items():
             self.plot_widget.set_smoothing_start_frequency(channel, spin.value() * 1000.0)
         self._apply_adc_calibration()
-        self._update_channel_controls()
-        layout.addWidget(self.plot_widget, 1)
-        self.measurement_labels = [QtWidgets.QLabel("—") for _ in range(8)]
-        measure = QtWidgets.QGroupBox("测量")
-        measure_layout = QtWidgets.QVBoxLayout(measure)
-        grid = QtWidgets.QGridLayout()
-        titles = ["A Min", "A Max", "A Vpp", "A 频率", "B Min", "B Max", "B Vpp", "B 频率"]
-        for i, title in enumerate(titles):
-            grid.addWidget(QtWidgets.QLabel(title), i // 4 * 2, i % 4)
-            grid.addWidget(self.measurement_labels[i], i // 4 * 2 + 1, i % 4)
-        self.cal_vpp_spins: dict[int, QtWidgets.QDoubleSpinBox] = {}
-        self.calibrate_buttons: dict[int, QtWidgets.QPushButton] = {}
-        self.reset_cal_buttons: dict[int, QtWidgets.QPushButton] = {}
-        measure_layout.addLayout(grid)
-        measure_layout.addLayout(self._make_cal_row(1))
-        measure_layout.addLayout(self._make_cal_row(2))
-        layout.addWidget(measure)
+        screen = QtWidgets.QFrame()
+        screen.setObjectName("scopeScreen")
+        screen.setStyleSheet(
+            f"#scopeScreen {{ border: 1px solid #232b38; border-radius: 14px; background: {PLOT_BACKGROUND}; }}")
+        screen_layout = QtWidgets.QVBoxLayout(screen)
+        screen_layout.setContentsMargins(10, 10, 10, 10)
+        screen_layout.addWidget(self.plot_widget)
+        layout.addWidget(screen, 1)
+        # 测量卡片：每通道一张，四项读数用大号等宽字体。
+        self.measurement_labels = [
+            self._styled(QtWidgets.QLabel("—"), role="value") for _ in range(8)
+        ]
+        cards = QtWidgets.QHBoxLayout()
+        cards.setSpacing(12)
+        for channel in (1, 2):
+            card = QtWidgets.QGroupBox(f"●  CH{channel}  测量")
+            card.setObjectName(f"ch{channel}Card")
+            grid = QtWidgets.QGridLayout(card)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setVerticalSpacing(2)
+            for i, title in enumerate(("最小值", "最大值", "峰峰值", "频率")):
+                grid.addWidget(self._styled(QtWidgets.QLabel(title), role="caption"), 0, i)
+                grid.addWidget(self.measurement_labels[(channel - 1) * 4 + i], 1, i)
+                grid.setColumnStretch(i, 1)
+            cards.addWidget(card)
+        layout.addLayout(cards)
         records = QtWidgets.QGroupBox("SQLite 记录与回放")
         record_layout = QtWidgets.QVBoxLayout(records)
         self.records_table = QtWidgets.QTableWidget(0, 7)
@@ -404,6 +696,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_channel_controls()
         return panel
 
+    def _update_scope_badges(self) -> None:
+        if not hasattr(self, "trigger_badge"):
+            return
+        mode = ChannelDisplayMode(self.channel_mode_combo.currentData())
+        for channel, badge, combo, position in (
+            (1, self.ch1_badge, self.ch1_vdiv_combo, self.ch1_position_spin),
+            (2, self.ch2_badge, self.ch2_vdiv_combo, self.ch2_position_spin),
+        ):
+            active = mode == ChannelDisplayMode.BOTH or int(mode) == channel
+            badge.setText(f"CH{channel}  {combo.currentText()}  {position.value():+.2f} div"
+                          if active else f"CH{channel}  OFF")
+            badge.setEnabled(active)
+        self.timebase_badge.setText(f"H  {self.timebase_combo.currentText()}")
+        edge = "↑" if self.trigger_edge.currentIndex() == 0 else "↓"
+        self.trigger_badge.setText(
+            f"T  CH{self.trigger_source.currentIndex() + 1} {edge} {self.threshold_spin.value()}")
+
     def _make_cal_row(self, channel: int) -> QtWidgets.QHBoxLayout:
         spin = QtWidgets.QDoubleSpinBox()
         spin.setRange(0.1, 10.0)
@@ -412,16 +721,19 @@ class MainWindow(QtWidgets.QMainWindow):
         spin.setValue(2.0)
         spin.setSuffix(" Vpp")
         calibrate = QtWidgets.QPushButton(f"校准 CH{channel}")
-        reset = QtWidgets.QPushButton(f"复位 CH{channel}")
+        reset = self._styled(QtWidgets.QPushButton("复位"), kind="ghost")
         self.cal_vpp_spins[channel] = spin
         self.calibrate_buttons[channel] = calibrate
         self.reset_cal_buttons[channel] = reset
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel(f"CH{channel} 已知峰峰值"))
-        row.addWidget(spin)
+        caption = QtWidgets.QLabel(f"CH{channel}")
+        caption.setStyleSheet(
+            f"color: {CH1_COLOR if channel == 1 else CH2_COLOR}; font-weight: 700;")
+        caption.setFixedWidth(36)
+        row.addWidget(caption)
+        row.addWidget(spin, 1)
         row.addWidget(calibrate)
         row.addWidget(reset)
-        row.addStretch(1)
         return row
 
     def _connect_signals(self) -> None:
@@ -435,8 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda _index, ch=channel: self._on_dac_mode_changed(ch)
             )
         self.apply_acquisition_button.clicked.connect(self._apply_acquisition)
-        self.run_button.clicked.connect(self._run_acquisition)
-        self.stop_button.clicked.connect(self._stop_acquisition)
+        self.run_button.clicked.connect(self._toggle_run)
         self.capture_button.clicked.connect(self._start_manual_capture)
         self.acquisition_mode_combo.currentIndexChanged.connect(self._on_acquisition_mode_changed)
         self.timebase_combo.currentTextChanged.connect(self._set_timebase)
@@ -446,6 +757,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ch2_vdiv_combo.currentIndexChanged.connect(lambda: self._set_vdiv(2))
         self.ch1_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(1, value))
         self.ch2_position_spin.valueChanged.connect(lambda value: self.plot_widget.set_vertical_position_div(2, value))
+        for signal in (
+            self.ch1_vdiv_combo.currentIndexChanged, self.ch2_vdiv_combo.currentIndexChanged,
+            self.ch1_position_spin.valueChanged, self.ch2_position_spin.valueChanged,
+            self.timebase_combo.currentIndexChanged, self.trigger_source.currentIndexChanged,
+            self.trigger_edge.currentIndexChanged, self.threshold_spin.valueChanged,
+        ):
+            signal.connect(self._update_scope_badges)
+        self._update_scope_badges()
         self.analysis_combo.currentIndexChanged.connect(self._set_analysis)
         self.save_button.clicked.connect(self._save_current)
         self.refresh_records_button.clicked.connect(self._refresh_records)
@@ -659,6 +978,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.timebase_combo.setCurrentIndex(last_enabled)
         self.timebase_combo.blockSignals(False)
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
+        self._update_scope_badges()
         self.run_button.setEnabled(not self._mode_switching)
         self.capture_button.setEnabled(not self._mode_switching)
 
@@ -770,7 +1090,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_acquisition_mode_widgets(self) -> None:
         manual = self._acquisition_mode == AcquisitionMode.MANUAL
         self.run_button.setVisible(not manual)
-        self.stop_button.setVisible(not manual)
         self.apply_acquisition_button.setVisible(not manual)
         self.capture_button.setVisible(manual)
         self.duration_spin.setVisible(manual)
@@ -870,7 +1189,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # 先读取实际模式；用户确认跳帽位置后再手动运行。
             QtCore.QTimer.singleShot(100, self._query_status)
         self.uart_button.setText("断开 UART" if connected else "连接 UART")
-        self.status_labels["uart"].setText("已连接" if connected else "断开")
+        self._set_status("uart", "已连接" if connected else "断开")
         self.statusBar().showMessage(detail, 3000)
 
     def _sync_scope_configuration(self) -> None:
@@ -919,15 +1238,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 if actual_mode != self._sampling_mode or first_status:
                     self._sampling_mode = actual_mode
                     self._sync_sampling_widgets()
-            self.status_labels["phy"].setText("已连接" if status["network_link_up"] else "断开")
-            self.status_labels["mig"].setText("已校准" if status["ddr_calibrated"] else "未校准")
-            self.status_labels["capture"].setText("ARM" if status["adc_armed"] else ("忙" if status["control_busy"] else "空闲"))
+            self._set_status("phy", "已连接" if status["network_link_up"] else "断开")
+            self._set_status("mig", "已校准" if status["ddr_calibrated"] else "未校准")
+            self._set_status("capture", "ARM" if status["adc_armed"] else ("忙" if status["control_busy"] else "空闲"))
             if self._interleave_supported:
-                self.status_labels["adc"].setText("溢出" if status["sample_overflow"] else
+                self._set_status("adc", "溢出" if status["sample_overflow"] else
                                                   ("就绪" if status["sample_ready"] else "未就绪"))
             else:
-                self.status_labels["adc"].setText("正常" if status["adc_clock_alive"] else "异常")
-            self.status_labels["mmcm"].setText("锁定" if status["mmcm_locked"] else "未锁定")
+                self._set_status("adc", "正常" if status["adc_clock_alive"] else "异常")
+            self._set_status("mmcm", "锁定" if status["mmcm_locked"] else "未锁定")
 
     def _on_frame(self, frame: CompletedFrame, persist_measurement: bool = True) -> None:
         if persist_measurement and (self._mode_switching or bool(frame.header.flags & 0x0100) != bool(self._sampling_mode)):
@@ -1034,6 +1353,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.timebase_combo.blockSignals(False)
         self.plot_widget.set_timebase(float(selected))
+        self._update_scope_badges()
 
     def _measure_raw_frame(self, frame: CompletedFrame) -> None:
         decoded = decode_raw32(frame.payload, frame.header.channel_mask)
@@ -1142,7 +1462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             labels[3].setText(format_frequency_hz(frequency) if valid else "无效")
         otr_a = (str(measurement.otr_count_a) if channel_mask & 0x01 else "未启用")
         otr_b = (str(measurement.otr_count_b) if channel_mask & 0x02 else "未启用")
-        self.status_labels["otr"].setText(f"{otr_a}/{otr_b}")
+        self._set_status("otr", f"{otr_a}/{otr_b}")
 
     def _calibrate_amplitude(self, channel: int) -> None:
         if channel not in (1, 2):
@@ -1225,7 +1545,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return abs(actual - expected) <= expected * 0.05
 
     def _on_udp_stats(self, stats: dict[str, int]) -> None:
-        self.status_labels["loss"].setText(f"{stats['errors']}/{stats['dropped_frames']}")
+        self._set_status("loss", f"{stats['errors']}/{stats['dropped_frames']}")
 
     def _set_timebase(self, text: str) -> None:
         seconds = self.timebase_combo.currentData()
@@ -1284,6 +1604,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trigger_source.setCurrentIndex(0)
         elif mode == ChannelDisplayMode.CH2:
             self.trigger_source.setCurrentIndex(1)
+        self._update_scope_badges()
 
     def _set_vdiv(self, channel: int) -> None:
         combo = self.ch1_vdiv_combo if channel == 1 else self.ch2_vdiv_combo

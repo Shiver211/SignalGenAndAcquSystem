@@ -108,6 +108,9 @@ class PlotWidget(QtWidgets.QWidget):
         self._frame_trigger_alignment: tuple[int, float, bool] | None = None
         self._has_trigger_alignment = False
         self._envelope_active = False
+        self._fft_span_hz = 0.0
+        self._fft_freq_per_div = 0.0
+        self._fft_volts_per_div = 0.0
         self._configure_grid()
         self._set_time_range()
         self._apply_visibility()
@@ -128,6 +131,9 @@ class PlotWidget(QtWidgets.QWidget):
 
     def set_fft_enabled(self, enabled: bool) -> None:
         self._fft = bool(enabled)
+        if not self._fft:
+            self._configure_grid()
+            self._set_time_range()
         if self._last_frame is not None:
             self.display_frame(self._last_frame)
 
@@ -268,8 +274,9 @@ class PlotWidget(QtWidgets.QWidget):
         if not np.isfinite(value) or value <= 0:
             raise ValueError("时间/div 必须为正数")
         self._seconds_per_div = value
-        self._configure_grid()
-        self._set_time_range()
+        if not self._fft:
+            self._configure_grid()
+            self._set_time_range()
 
     set_time_per_div = set_timebase
 
@@ -310,9 +317,39 @@ class PlotWidget(QtWidgets.QWidget):
             self._frame_trigger_alignment = self._trigger_alignment
         self._last_frame = frame
         sample_format = frame.header.sample_format
+        if self._fft:
+            if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
+                values = decode_envelope64(frame.payload, frame.header.channel_mask)
+                min_a = values["min_a"].astype(np.float64)
+                max_a = values["max_a"].astype(np.float64)
+                min_b = values["min_b"].astype(np.float64)
+                max_b = values["max_b"].astype(np.float64)
+                center_a = (min_a + max_a) / 2.0
+                center_b = (min_b + max_b) / 2.0
+                a = self._codes_to_volts(center_a, 1)
+                b = self._codes_to_volts(center_b, 2)
+                if len(a) > 0 and frame.header.sample_rate_hz > 0:
+                    self._display_fft(a, b, frame.header.sample_rate_hz)
+                    return
+                self._clear_waveforms()
+                return
+            if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16,
+                                 SampleFormat.DECIMATED32):
+                decode_mask = (frame.header.channel_mask
+                               if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
+                               else 0x03)
+                decoded = decode_raw32(frame.payload, decode_mask)
+                a = self._codes_to_volts(decoded["a"], 1)
+                b = self._codes_to_volts(decoded["b"], 2)
+                if len(a) > 0 and frame.header.sample_rate_hz > 0:
+                    self._display_fft(a, b, frame.header.sample_rate_hz)
+                    return
+                self._clear_waveforms()
+                return
+            self._clear_waveforms()
+            return
+
         if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
-            # Min/Max 包络没有桶内相位信息，不能伪装成原始波形做 FFT。
-            # 仍显示包络范围，用户切换回时域即可查看。
             self._display_envelope(frame)
             return
         if sample_format not in (SampleFormat.RAW32, SampleFormat.RAW16,
@@ -320,8 +357,6 @@ class PlotWidget(QtWidgets.QWidget):
             self._clear_waveforms()
             return
 
-        # RAW16 是网络紧凑单通道格式；DECIMATED32 即使只有一个有效
-        # 通道也仍保持 32bit 双槽布局（另一槽由 FPGA 置零）。
         decode_mask = (frame.header.channel_mask
                        if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
                        else 0x03)
@@ -330,9 +365,6 @@ class PlotWidget(QtWidgets.QWidget):
         b = self._codes_to_volts(decoded["b"], 2)
         if len(a) == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
-            return
-        if self._fft:
-            self._display_fft(a, b, frame.header.sample_rate_hz)
             return
 
         sample_rate = float(frame.header.sample_rate_hz)
@@ -453,6 +485,18 @@ class PlotWidget(QtWidgets.QWidget):
         position = refine_trigger_position(lo, level, falling=falling)
         return position if position is not None else 0.0
 
+    @property
+    def fft_freq_per_div(self) -> float:
+        return getattr(self, "_fft_freq_per_div", 0.0)
+
+    @property
+    def fft_volts_per_div(self) -> float:
+        return getattr(self, "_fft_volts_per_div", 0.0)
+
+    @property
+    def fft_span_hz(self) -> float:
+        return getattr(self, "_fft_span_hz", 0.0)
+
     def _display_fft(self, a: np.ndarray, b: np.ndarray, sample_rate_hz: int) -> None:
         fa, ma = fft_spectrum(a, sample_rate_hz)
         fb, mb = fft_spectrum(b, sample_rate_hz)
@@ -461,7 +505,22 @@ class PlotWidget(QtWidgets.QWidget):
         self.curve_a.setData(fa, ma, connect="all")
         self.curve_b.setData(fb, mb, connect="all")
         if fa.size:
-            self.plot.setXRange(0, sample_rate_hz / 2, padding=0)
+            span = sample_rate_hz / 2.0
+            self._fft_span_hz = span
+            self._fft_freq_per_div = span / self.HORIZONTAL_DIVISIONS
+            max_v = max(
+                float(np.max(ma)) if ma.size else 0.0,
+                float(np.max(mb)) if mb.size else 0.0,
+            )
+            top = max(0.2, max_v * 1.15)
+            self._fft_volts_per_div = top / self.VERTICAL_DIVISIONS
+            self.plot.setXRange(0, span, padding=0)
+            self.plot.setYRange(0, top, padding=0)
+            self.grid_item.setTickSpacing(
+                x=[self._fft_freq_per_div], y=[self._fft_volts_per_div],
+            )
+            self.center_time_line.setValue(span / 2.0)
+            self.center_level_line.setValue(top / 2.0)
         self._apply_visibility()
 
     # ---- 内部绘图辅助 --------------------------------------------------

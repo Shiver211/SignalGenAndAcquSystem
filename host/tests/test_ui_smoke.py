@@ -228,6 +228,82 @@ class UiSmokeTest(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_replay_preserves_frame_when_timebase_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "replay_tb.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
+            payload = b"\x01\x00\x02\x00\x03\x00\x04\x00"
+            live_frame = CompletedFrame(
+                PacketHeader(1, 2, 9, 1, 100, 0, 3,
+                             SampleFormat.ENVELOPE64, 0, 0, len(payload), 3),
+                payload,
+            )
+            window._on_frame(live_frame)
+            window._save_current()
+            window.timebase_combo.setCurrentText("10 ns/div")
+            window.current_frame = None
+            window.records_table.selectRow(0)
+            window._replay_selected()
+            self.assertIsNotNone(window.current_frame)
+            self.assertEqual(window.current_frame.payload, payload)
+            window.close()
+            self.app.processEvents()
+
+    def test_fft_analysis_on_envelope_and_raw_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "fft.db")
+            window.timebase_combo.setCurrentText("1 ms/div")
+            window.analysis_combo.setCurrentText("FFT")
+            self.assertTrue(window.plot_widget._fft)
+
+            payload = struct.pack("<HHHH", 1000, 3000, 1500, 2500) * 100
+            env_frame = CompletedFrame(
+                PacketHeader(1, 2, 1, 100, 10000, 0, 3,
+                             SampleFormat.ENVELOPE64, 0, 0, len(payload), 3),
+                payload,
+            )
+            window._on_frame(env_frame)
+            self.assertGreater(window.plot_widget.fft_freq_per_div, 0)
+            self.assertIn("/div", window.timebase_badge.text())
+            self.assertIn("SPAN", window.trigger_badge.text())
+
+            codes = (np.sin(np.linspace(0, 20, 500)) * 1000 + 2048).astype("<u4")
+            raw_payload = (codes | (codes << 12)).tobytes()
+            raw_frame = CompletedFrame(
+                PacketHeader(1, 1, 2, len(codes), ADC_SAMPLE_RATE_HZ, 0, 3,
+                             SampleFormat.RAW32, 0, 0, len(raw_payload), 0),
+                raw_payload,
+            )
+            window._on_frame(raw_frame)
+            self.assertGreater(window.plot_widget.fft_freq_per_div, 0)
+            self.assertIn("/div", window.timebase_badge.text())
+
+            window.analysis_combo.setCurrentText("时域")
+            self.assertFalse(window.plot_widget._fft)
+            self.assertEqual(window.timebase_badge.text(), window.timebase_combo.currentText().replace(" ", ""))
+
+            window.close()
+            self.app.processEvents()
+
+    def test_replay_stops_continuous_acquisition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "replay_stop.db")
+            window._continuous_running = True
+            payload = b"\x01\x00\x02\x00\x03\x00\x04\x00"
+            live_frame = CompletedFrame(
+                PacketHeader(1, 2, 9, 1, 100, 0, 3,
+                             SampleFormat.ENVELOPE64, 0, 0, len(payload), 3),
+                payload,
+            )
+            window.current_frame = live_frame
+            window._save_current()
+            window.records_table.selectRow(0)
+            with mock.patch.object(window, "_stop_acquisition") as stop_acq:
+                window._replay_selected()
+                stop_acq.assert_called_once()
+            window.close()
+            self.app.processEvents()
+
     def test_channel_and_time_div_are_sent_to_fpga(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             window = create_window(Path(directory) / "scope.db")

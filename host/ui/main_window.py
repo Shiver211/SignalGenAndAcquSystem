@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from math import ceil
 from time import monotonic
@@ -160,6 +161,10 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.apply_acquisition_button, "check", None),
             *((self.calibrate_buttons[ch], "target", None) for ch in (1, 2)),
             *((self.reset_cal_buttons[ch], "reset", None) for ch in (1, 2)),
+            (self.save_button, "save", None),
+            (self.refresh_records_button, "refresh", None),
+            (self.replay_button, "play", None),
+            (self.delete_record_button, "reset", None),
         ):
             button.setIcon(icon(name, color) if color else icon(name))
             button.setIconSize(QtCore.QSize(15, 15))
@@ -267,7 +272,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sidebar = QtWidgets.QWidget()
         sidebar.setObjectName("sidebar")
         sidebar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        sidebar.setFixedWidth(460)
+        sidebar.setFixedWidth(520)
         outer = QtWidgets.QVBoxLayout(sidebar)
         outer.setContentsMargins(0, 0, 0, 0)
         tabs = QtWidgets.QTabWidget()
@@ -331,14 +336,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.records_table.setHorizontalHeaderLabels(
             ["ID", "时间", "帧号", "类型", "点数", "字节", "备注"]
         )
-        self.records_table.horizontalHeader().setSectionResizeMode(
-            1, QtWidgets.QHeaderView.Stretch
-        )
+        self.records_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.records_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.records_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.records_table.cellDoubleClicked.connect(lambda _r, _c: self._replay_selected())
+        header = self.records_table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.Stretch)
+        self.records_table.verticalHeader().setDefaultSectionSize(28)
         record_layout.addWidget(self.records_table)
         record_buttons = QtWidgets.QHBoxLayout()
         self.refresh_records_button = QtWidgets.QPushButton("刷新")
         self.replay_button = QtWidgets.QPushButton("回放")
         self.delete_record_button = QtWidgets.QPushButton("删除")
+        for btn in (self.refresh_records_button, self.replay_button, self.delete_record_button):
+            btn.setCursor(QtCore.Qt.PointingHandCursor)
         record_buttons.addStretch(1)
         record_buttons.addWidget(self.refresh_records_button)
         record_buttons.addWidget(self.replay_button)
@@ -649,16 +662,9 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(16, 14, 16, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
+        # 单行顶栏：显示模式 + 状态徽章 + 备注与保存（方案 B）
         self.analysis_combo = QtWidgets.QComboBox(); self.analysis_combo.addItems(["时域", "FFT"])
-        self.save_button = QtWidgets.QPushButton("保存当前帧")
-        self.note_edit = QtWidgets.QLineEdit(); self.note_edit.setPlaceholderText("记录备注")
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(8)
-        toolbar.addWidget(self.note_edit, 1)
-        toolbar.addWidget(self.save_button)
-        layout.addLayout(toolbar)
-        # 通道、时基和触发信息并排显示在波形上方。
         info = QtWidgets.QHBoxLayout()
         info.setSpacing(8)
         info.addWidget(QtWidgets.QLabel("显示"))
@@ -673,9 +679,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trigger_badge.setStyleSheet("color: #ff9f5a;")
         info.addWidget(self.ch1_badge)
         info.addWidget(self.ch2_badge)
-        info.addStretch(1)
+        info.addSpacing(4)
         info.addWidget(self.timebase_badge)
         info.addWidget(self.trigger_badge)
+        info.addStretch(1)
+        self.note_edit = QtWidgets.QLineEdit()
+        self.note_edit.setPlaceholderText("记录备注")
+        self.note_edit.setFixedWidth(150)
+        self.save_button = QtWidgets.QPushButton("保存当前帧")
+        self.save_button.setCursor(QtCore.Qt.PointingHandCursor)
+        info.addWidget(self.note_edit)
+        info.addWidget(self.save_button)
         layout.addLayout(info)
         self.plot_widget = PlotWidget()
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
@@ -720,7 +734,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_scope_badges(self) -> None:
         if not hasattr(self, "trigger_badge"):
             return
+        is_fft = hasattr(self, "analysis_combo") and self.analysis_combo.currentText() == "FFT"
         mode = ChannelDisplayMode(self.channel_mode_combo.currentData())
+        if is_fft:
+            freq_div = self.plot_widget.fft_freq_per_div
+            volts_div = self.plot_widget.fft_volts_per_div
+            span = self.plot_widget.fft_span_hz
+            for channel, badge in ((1, self.ch1_badge), (2, self.ch2_badge)):
+                active = mode == ChannelDisplayMode.BOTH or int(mode) == channel
+                v_text = format_voltage(volts_div) if volts_div > 0 else "—"
+                badge.setText(f"CH{channel} {v_text}/div" if active else f"CH{channel}  OFF")
+                badge.setEnabled(active)
+            self.timebase_badge.setText(f"{format_frequency_hz(freq_div)}/div" if freq_div > 0 else "FFT")
+            self.trigger_badge.setText(f"SPAN {format_frequency_hz(span)}" if span > 0 else "FFT 频域")
+            return
+
         for channel, badge, combo, position in (
             (1, self.ch1_badge, self.ch1_vdiv_combo, self.ch1_position_spin),
             (2, self.ch2_badge, self.ch2_vdiv_combo, self.ch2_position_spin),
@@ -783,6 +811,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ch1_position_spin.valueChanged, self.ch2_position_spin.valueChanged,
             self.timebase_combo.currentIndexChanged, self.trigger_source.currentIndexChanged,
             self.trigger_edge.currentIndexChanged, self.threshold_spin.valueChanged,
+            self.analysis_combo.currentIndexChanged,
         ):
             signal.connect(self._update_scope_badges)
         self._update_scope_badges()
@@ -1282,7 +1311,7 @@ class MainWindow(QtWidgets.QMainWindow):
         is_raw = frame.header.sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
         if is_raw:
             self.latest_raw_frame_id = frame.header.frame_id
-        if self._manual_busy or self._acquisition_mode == AcquisitionMode.MANUAL:
+        if persist_measurement and (self._manual_busy or self._acquisition_mode == AcquisitionMode.MANUAL):
             if is_raw:
                 self._accept_manual_raw(frame)
             return
@@ -1294,8 +1323,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.store.save_measurement(frame.header.frame_id, self._last_measurement)
         else:
             # 时基切换期间残留的旧包络帧不能覆盖即时过渡显示；只有
-            # 帧头时长匹配当前窗口的新帧才更新当前波形。
-            if (frame.header.sample_format in
+            # 帧头时长匹配当前窗口的新帧才更新当前波形。回放帧不受此过滤。
+            if (persist_measurement and
+                    frame.header.sample_format in
                     (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32) and
                     not self._envelope_matches_timebase(frame)):
                 return
@@ -1311,6 +1341,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._measure_raw_frame(frame)
             else:
                 self._update_square_amplitude(frame)
+            self._update_scope_badges()
 
     def _clear_continuous_measurement(self) -> None:
         self._hardware_measurement = None
@@ -1661,27 +1692,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.set_fft_enabled(index == 1)
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
+        self._update_scope_badges()
 
     def _save_current(self) -> None:
         if self.current_frame is None:
             self.statusBar().showMessage("当前没有可保存帧", 3000)
             return
         config = {
+            "timebase": self.timebase_combo.currentText(),
             "sampling_mode": self._sampling_mode,
-            "mode": self.mode_combo.currentText(), "decimation": int(self.decimation_combo.currentText()),
-            "display_points": self.display_points_spin.value(), "refresh_hz": self.refresh_spin.value(),
+            "channel_mode": self.channel_mode_combo.currentText(),
+            "acquisition_mode": self.acquisition_mode_combo.currentText(),
+            "ch1_vdiv": self.ch1_vdiv_combo.currentText(),
+            "ch2_vdiv": self.ch2_vdiv_combo.currentText(),
+            "ch1_position": self.ch1_position_spin.value(),
+            "ch2_position": self.ch2_position_spin.value(),
+            "trigger_source": self.trigger_source.currentText(),
+            "trigger_edge": self.trigger_edge.currentText(),
+            "threshold": self.threshold_spin.value(),
+            "hysteresis": self.hysteresis_spin.value(),
         }
-        record_id = self.store.save_frame(self.current_frame, config=config, note=self.note_edit.text())
-        self.statusBar().showMessage(f"已保存记录 {record_id}", 3000)
+        note = self.note_edit.text().strip()
+        record_id = self.store.save_frame(self.current_frame, config=config, note=note)
+        self.statusBar().showMessage(f"已保存记录 #{record_id}", 3000)
         self._refresh_records()
 
     def _refresh_records(self) -> None:
         records = self.store.list_captures()
+        format_names = {
+            SampleFormat.RAW32: "RAW32",
+            SampleFormat.RAW16: "RAW16",
+            SampleFormat.ENVELOPE64: "包络64",
+            SampleFormat.ENVELOPE32: "包络32",
+            SampleFormat.DECIMATED32: "抽点32",
+            SampleFormat.MEASUREMENT_V1: "测量",
+        }
         self.records_table.setRowCount(len(records))
         for row, record in enumerate(records):
-            values = [record.id, record.captured_at, record.frame_id, record.sample_format, record.total_samples, record.payload_bytes, record.note]
+            fmt_str = format_names.get(record.sample_format, f"格式{record.sample_format}")
+            try:
+                dt = datetime.fromisoformat(record.captured_at)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone()
+                time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                time_str = str(record.captured_at)[:19].replace("T", " ")
+            values = [
+                record.id,
+                time_str,
+                record.frame_id,
+                fmt_str,
+                record.total_samples,
+                record.payload_bytes,
+                record.note,
+            ]
             for column, value in enumerate(values):
-                self.records_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
+                item = QtWidgets.QTableWidgetItem(str(value))
+                if column in (0, 2, 4, 5):
+                    item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                elif column in (1, 3):
+                    item.setTextAlignment(QtCore.Qt.AlignCenter | QtCore.Qt.AlignVCenter)
+                self.records_table.setItem(row, column, item)
 
     def _selected_record_id(self) -> int | None:
         row = self.records_table.currentRow()
@@ -1690,14 +1761,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _replay_selected(self) -> None:
         record_id = self._selected_record_id()
-        if record_id is not None:
-            self._on_frame(self.store.load_frame(record_id), persist_measurement=False)
+        if record_id is None:
+            self.statusBar().showMessage("请先在列表中选择一条记录", 3000)
+            return
+        if self._continuous_running:
+            self._stop_acquisition()
+        frame = self.store.load_frame(record_id)
+        self._on_frame(frame, persist_measurement=False)
+        self.statusBar().showMessage(f"已回放记录 #{record_id}（帧号 {frame.header.frame_id}）", 4000)
 
     def _delete_selected(self) -> None:
         record_id = self._selected_record_id()
-        if record_id is not None:
-            self.store.delete_capture(record_id)
-            self._refresh_records()
+        if record_id is None:
+            self.statusBar().showMessage("请先在列表中选择一条记录", 3000)
+            return
+        self.store.delete_capture(record_id)
+        self._refresh_records()
+        self.statusBar().showMessage(f"已删除记录 #{record_id}", 3000)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._mode_retry.stop()

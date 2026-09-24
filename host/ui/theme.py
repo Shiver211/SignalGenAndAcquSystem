@@ -48,7 +48,7 @@ QTabWidget::pane {{ border: none; }}
 QTabWidget::tab-bar {{ alignment: center; }}
 QTabBar {{ background: transparent; }}
 QTabBar::tab {{
-    background: transparent; color: {_MUTED}; padding: 7px 18px; margin: 10px 2px 6px 2px;
+    background: transparent; color: {_MUTED}; padding: 7px 14px; margin: 10px 2px 6px 2px;
     border-radius: 8px; font-weight: 600;
 }}
 QTabBar::tab:selected {{ background: #222b3a; color: #ffffff; }}

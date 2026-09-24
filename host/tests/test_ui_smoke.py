@@ -37,6 +37,19 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(window.udp_bind_edit.text(), PC_IP)
             self.assertEqual(window.udp_port_spin.value(), UDP_PORT)
             self.assertIn("DAC 波形控制", [group.title() for group in window.findChildren(QtWidgets.QGroupBox)])
+            self.assertFalse(window.analysis_combo.isHidden())
+            self.assertFalse(window.note_edit.isHidden())
+            self.assertFalse(window.save_button.isHidden())
+            self.assertEqual(
+                [window.control_tabs.tabText(i) for i in range(window.control_tabs.count())],
+                ["示波器", "信号源", "连接", "记录"],
+            )
+            records = next(
+                group for group in window.findChildren(QtWidgets.QGroupBox)
+                if group.title() == "SQLite 记录与回放"
+            )
+            self.assertFalse(records.isHidden())
+            self.assertFalse(window.records_table.isHidden())
             window.close()
             self.app.processEvents()
 

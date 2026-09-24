@@ -272,11 +272,12 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         tabs = QtWidgets.QTabWidget()
         tabs.setDocumentMode(True)
-        # 示波器页放第一位：日常最常用；信号源与连接各占一页，避免长滚动。
+        # 示波器页放第一位；信号源、连接和记录分别独立，避免长滚动。
         pages = (
             ("示波器", "scope", (self._acquisition_group,)),
             ("信号源", "wave", (self._generator_group,)),
             ("连接", "plug", (self._connection_group,)),
+            ("记录", "save", (self._records_page,)),
         )
         tabs.setIconSize(QtCore.QSize(16, 16))
         for title, icon_name, builders in pages:
@@ -318,6 +319,33 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("UDP", udp_row)
         form.addRow(self.udp_button)
         return group
+
+    def _records_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        records = QtWidgets.QGroupBox("SQLite 记录与回放")
+        record_layout = QtWidgets.QVBoxLayout(records)
+        self.records_table = QtWidgets.QTableWidget(0, 7)
+        self.records_table.setHorizontalHeaderLabels(
+            ["ID", "时间", "帧号", "类型", "点数", "字节", "备注"]
+        )
+        self.records_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.Stretch
+        )
+        record_layout.addWidget(self.records_table)
+        record_buttons = QtWidgets.QHBoxLayout()
+        self.refresh_records_button = QtWidgets.QPushButton("刷新")
+        self.replay_button = QtWidgets.QPushButton("回放")
+        self.delete_record_button = QtWidgets.QPushButton("删除")
+        record_buttons.addStretch(1)
+        record_buttons.addWidget(self.refresh_records_button)
+        record_buttons.addWidget(self.replay_button)
+        record_buttons.addWidget(self.delete_record_button)
+        record_layout.addLayout(record_buttons)
+        layout.addWidget(records, 1)
+        return page
 
     def _generator_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("DAC 波形控制")
@@ -625,13 +653,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analysis_combo = QtWidgets.QComboBox(); self.analysis_combo.addItems(["时域", "FFT"])
         self.save_button = QtWidgets.QPushButton("保存当前帧")
         self.note_edit = QtWidgets.QLineEdit(); self.note_edit.setPlaceholderText("记录备注")
-        # FFT、记录/回放属于后续高级功能，保留对象和槽函数但不放入主布局。
-        self.analysis_combo.setVisible(False)
-        self.note_edit.setVisible(False)
-        self.save_button.setVisible(False)
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(8)
+        toolbar.addWidget(self.note_edit, 1)
+        toolbar.addWidget(self.save_button)
+        layout.addLayout(toolbar)
         # 通道、时基和触发信息并排显示在波形上方。
         info = QtWidgets.QHBoxLayout()
         info.setSpacing(8)
+        info.addWidget(QtWidgets.QLabel("显示"))
+        info.addWidget(self.analysis_combo)
+        info.addSpacing(4)
         self.ch1_badge = self._styled(QtWidgets.QLabel(), role="chip")
         self.ch2_badge = self._styled(QtWidgets.QLabel(), role="chip")
         self.timebase_badge = self._styled(QtWidgets.QLabel(), role="chip")
@@ -682,20 +714,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 grid.setColumnStretch(column, 1)
             cards.addWidget(card)
         layout.addLayout(cards)
-        records = QtWidgets.QGroupBox("SQLite 记录与回放")
-        record_layout = QtWidgets.QVBoxLayout(records)
-        self.records_table = QtWidgets.QTableWidget(0, 7)
-        self.records_table.setHorizontalHeaderLabels(["ID", "时间", "帧号", "类型", "点数", "字节", "备注"])
-        self.records_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
-        record_layout.addWidget(self.records_table)
-        record_buttons = QtWidgets.QHBoxLayout()
-        self.refresh_records_button = QtWidgets.QPushButton("刷新")
-        self.replay_button = QtWidgets.QPushButton("回放")
-        self.delete_record_button = QtWidgets.QPushButton("删除")
-        record_buttons.addStretch(1); record_buttons.addWidget(self.refresh_records_button); record_buttons.addWidget(self.replay_button); record_buttons.addWidget(self.delete_record_button)
-        record_layout.addLayout(record_buttons)
-        records.setVisible(False)
-        layout.addWidget(records)
         self._update_channel_controls()
         return panel
 

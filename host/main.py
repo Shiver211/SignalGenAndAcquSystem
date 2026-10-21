@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from multiprocessing import freeze_support
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,4 +24,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    freeze_support()
     raise SystemExit(main())

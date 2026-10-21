@@ -17,6 +17,7 @@ from host.comm.data_protocol import (
     INTERLEAVE_FLAG, CompletedFrame, SampleFormat, decode_envelope64, decode_raw32,
 )
 from host.config import ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ
+from host.ui.async_plot import AsyncPlotWidget
 from host.ui.theme import CH1_COLOR, CH2_COLOR, GRID_COLOR, PLOT_BACKGROUND
 from host.core.waveform import (
     codes_to_voltage, fft_spectrum, idealize_square_display,
@@ -47,7 +48,7 @@ class PlotWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
 
-        self.plot = pg.PlotWidget(background=PLOT_BACKGROUND)
+        self.plot = AsyncPlotWidget(background=PLOT_BACKGROUND)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showGrid(x=False, y=False)
@@ -62,6 +63,8 @@ class PlotWidget(QtWidgets.QWidget):
         self.grid_item.setTextPen(None)
         self.grid_item.setPen(pg.mkPen(GRID_COLOR, width=1, style=pg.QtCore.Qt.DotLine))
         self.plot.addItem(self.grid_item)
+        # 延迟记录时变换可能晚于范围通知；变换就绪后同步网格边界缓存。
+        self.plot.getViewBox().sigTransformChanged.connect(self.grid_item.viewRangeChanged)
         # 中心十字轴线，便于读取格数；竖线随时间窗保持在屏幕中央。
         axis_pen = pg.mkPen(120, 136, 156, 150, width=1)
         self.center_level_line = pg.InfiniteLine(pos=0, angle=0, movable=False, pen=axis_pen)
@@ -135,6 +138,7 @@ class PlotWidget(QtWidgets.QWidget):
         return self._channel_mode
 
     def set_fft_enabled(self, enabled: bool) -> None:
+        self.plot.invalidate_render()
         self._fft = bool(enabled)
         if not self._fft:
             self._configure_grid()
@@ -169,11 +173,13 @@ class PlotWidget(QtWidgets.QWidget):
         } if self._channel_mode == ChannelDisplayMode.BOTH else {
             int(self._channel_mode),
         }
+        self.plot.invalidate_render()
         self._apply_visibility()
 
     def set_channel_visible(self, channel: int, visible: bool) -> None:
         """按通道设置显示状态；适合复选框等细粒度控制。"""
         channel = self._validate_channel(channel)
+        self.plot.invalidate_render()
         if visible:
             self._visible_channels.add(channel)
         else:
@@ -207,6 +213,7 @@ class PlotWidget(QtWidgets.QWidget):
             return
         self._adc_gain[channel] = gain_value
         self._adc_offset[channel] = offset_value
+        self.plot.invalidate_render()
         if redraw:
             self._redraw_last_frame()
 
@@ -225,6 +232,7 @@ class PlotWidget(QtWidgets.QWidget):
         if not np.isfinite(value) or value <= 0:
             raise ValueError("平滑起始频率必须为正数")
         self._smoothing_start_hz[channel] = value
+        self.plot.invalidate_render()
         self._redraw_last_frame()
 
     def _smooth_display(self, samples: np.ndarray, sample_rate_hz: float, channel: int) -> np.ndarray:
@@ -238,6 +246,7 @@ class PlotWidget(QtWidgets.QWidget):
         if not np.isfinite(value) or value <= 0:
             raise ValueError("电压/div 必须为正数")
         self._channel_settings[channel]["volts_per_div"] = value
+        self.plot.invalidate_render()
         self._redraw_last_frame()
 
     set_voltage_per_div = set_volts_per_div
@@ -255,6 +264,7 @@ class PlotWidget(QtWidgets.QWidget):
         self._channel_settings[channel]["position_div"] = (
             value / self._channel_settings[channel]["volts_per_div"]
         )
+        self.plot.invalidate_render()
         self._redraw_last_frame()
 
     set_channel_offset = set_vertical_position
@@ -266,6 +276,7 @@ class PlotWidget(QtWidgets.QWidget):
         if not np.isfinite(value):
             raise ValueError("通道垂直位置必须为有限数")
         self._channel_settings[channel]["position_div"] = value
+        self.plot.invalidate_render()
         self._redraw_last_frame()
 
     def vertical_position(self, channel: int) -> float:
@@ -283,6 +294,7 @@ class PlotWidget(QtWidgets.QWidget):
         if not np.isfinite(value) or value <= 0:
             raise ValueError("时间/div 必须为正数")
         self._seconds_per_div = value
+        self.plot.invalidate_render()
         if not self._fft:
             self._configure_grid()
             self._set_time_range()
@@ -303,7 +315,12 @@ class PlotWidget(QtWidgets.QWidget):
 
     def clear_frame(self) -> None:
         """清除当前波形，供采集配置切换时丢弃旧帧。"""
+        self.plot.invalidate_render(clear_image=True)
         self._clear_waveforms()
+
+    def closeEvent(self, event) -> None:
+        self.plot.shutdown_renderer()
+        super().closeEvent(event)
 
     # ---- 数据显示 ------------------------------------------------------
 

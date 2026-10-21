@@ -1826,6 +1826,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mode_switching = False
         self.status_timer.stop()
         self.display_timer.stop()
+        self.plot_widget.plot.shutdown_renderer()
         self.serial_link.disconnect_port()
         self.udp_receiver.stop()
         self.store.close()

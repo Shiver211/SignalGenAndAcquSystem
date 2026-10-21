@@ -17,7 +17,7 @@ from PyQt5 import QtWidgets
 from math import ceil
 
 from host.comm.data_protocol import CompletedFrame, PacketHeader, SampleFormat
-from host.comm.control_protocol import Command, DataMode
+from host.comm.control_protocol import Command, DataMode, Response
 from host.config import ADC_SAMPLE_RATE_HZ, PC_IP, UART_BAUD, UDP_PORT
 from host.core.waveform import fixed_dc_offset_v
 from host.tests.window_helpers import create_window
@@ -78,6 +78,26 @@ class UiSmokeTest(unittest.TestCase):
                 window._save_current()
                 record = window.store.list_captures()[0]
                 self.assertEqual(window.store.load_frame(record.id).payload, payload)
+            finally:
+                window.close()
+                self.app.processEvents()
+
+    def test_generator_limit_tracks_firmware_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = create_window(Path(directory) / "generator.db")
+            try:
+                self.assertEqual(window.frequency_spins[0].maximum(), 5_000_000)
+                window.frequency_spins[0].setValue(1_000_000)
+                legacy = bytearray(32)
+                legacy[0:2] = bytes((1, 3))
+                window._on_response(0, Response(Command.QUERY_STATUS, 0, bytes(legacy)))
+                # 旧位流的 MAX_DAC_FTW 仍为 50kHz，超出部分必须被收回。
+                self.assertEqual(window.frequency_spins[0].maximum(), 50_000)
+                self.assertEqual(window.frequency_spins[0].value(), 50_000)
+                newer = bytearray(32)
+                newer[0:2] = bytes((1, 4))
+                window._on_response(0, Response(Command.QUERY_STATUS, 0, bytes(newer)))
+                self.assertEqual(window.frequency_spins[0].maximum(), 5_000_000)
             finally:
                 window.close()
                 self.app.processEvents()

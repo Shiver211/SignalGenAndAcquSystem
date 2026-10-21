@@ -24,7 +24,7 @@ from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
 from host.config import (
     ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
-    PC_IP, UART_BAUD, UDP_PORT,
+    PC_IP, UART_BAUD, UDP_PORT, GENERATOR_MAX_HZ,
     DISPLAY_MAX_FPS,
 )
 from host.core.dac_calibration import (
@@ -96,6 +96,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._acquisition_mode = AcquisitionMode.CONTINUOUS
         self._sampling_mode = 0
         self._interleave_supported = False
+        # 连接后按固件协议版本收紧；1.4 之前的位流仍限制在 50kHz。
+        self._generator_max_hz = GENERATOR_MAX_HZ
         self._status_received = False
         self._mode_switching = False
         self._mode_steps = []
@@ -389,10 +391,13 @@ class MainWindow(QtWidgets.QMainWindow):
             wave = QtWidgets.QComboBox()
             wave.addItems(["正弦", "三角", "方波"])
             frequency = QtWidgets.QDoubleSpinBox()
-            frequency.setRange(0, 50_000)
+            frequency.setRange(0, self._generator_max_hz)
             frequency.setDecimals(3)
+            frequency.setSingleStep(1_000)
             frequency.setValue(1000 * (channel + 1))
             frequency.setSuffix(" Hz")
+            frequency.setToolTip(
+                "未连接时按最新固件 5 MHz；连接后按协议版本自动调整。")
             mode = QtWidgets.QComboBox()
             mode.addItems(["低压档（最小增益）", "高压档（最大增益）"])
             amplitude = QtWidgets.QDoubleSpinBox()
@@ -937,6 +942,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_dac_calibration_label(channel)
         self.statusBar().showMessage(f"CH{channel} {DAC_GAIN_MODES[mode]} 档已标定", 5000)
 
+    def _apply_generator_limit(self, maximum_hz: int) -> None:
+        """按固件协议版本收紧频率输入上限，旧位流只允许 50kHz。"""
+        maximum_hz = int(maximum_hz)
+        if maximum_hz <= 0 or maximum_hz == self._generator_max_hz:
+            return
+        self._generator_max_hz = maximum_hz
+        clamped = []
+        for channel, spin in enumerate(self.frequency_spins, start=1):
+            if spin.value() > maximum_hz:
+                clamped.append(channel)
+            spin.setMaximum(maximum_hz)
+            spin.setSingleStep(1_000 if maximum_hz > 50_000 else 100)
+            spin.setToolTip(
+                f"当前固件上限 {maximum_hz / 1e6:g} MHz；连接后按协议版本自动调整。")
+        if clamped:
+            self.statusBar().showMessage(
+                f"固件协议较旧，CH{clamped[0]} 频率已收紧到 {maximum_hz / 1e3:g} kHz", 6000)
+
     def _apply_generator(self) -> None:
         amplitudes = []
         for channel in (1, 2):
@@ -1305,6 +1328,7 @@ class MainWindow(QtWidgets.QMainWindow):
             first_status = not self._status_received
             self._status_received = True
             self._interleave_supported = bool(status["interleave_supported"])
+            self._apply_generator_limit(int(status["generator_max_hz"]))
             if not self._mode_switching:
                 actual_mode = int(status["sampling_mode"]) if self._interleave_supported else 0
                 if actual_mode != self._sampling_mode or first_status:

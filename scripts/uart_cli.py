@@ -36,6 +36,9 @@ STATUS_NAMES = {
 
 WAVE_CODES = {"sine": 0, "triangle": 1, "square": 2}
 MODE_CODES = {"raw": 0, "envelope": 1, "decimated": 2}
+# 与 rtl/control/reg_file.v 的 MAX_DAC_FTW 保持一致（5MHz @ 100MSPS）。
+MAX_DAC_FTW = 0x0CCC_CCCD
+MAX_DAC_FREQUENCY_HZ = 5_000_000.0
 
 
 def crc8_atm(data: bytes) -> int:
@@ -117,15 +120,16 @@ def build_generator_payload(args: argparse.Namespace) -> bytes:
     if args.ftw is not None:
         ftw = args.ftw
     else:
-        if not 0.0 <= args.frequency <= 50_000.0:
-            raise ValueError("frequency 必须在 0..50000Hz")
+        if not 0.0 <= args.frequency <= MAX_DAC_FREQUENCY_HZ:
+            raise ValueError(f"frequency 必须在 0..{MAX_DAC_FREQUENCY_HZ:g}Hz")
         ftw = round(args.frequency * (1 << 32) / args.update_rate)
 
     amplitude_q15 = round(args.amplitude_vpk / 5.0 * 0x8000)
     if not 0 <= amplitude_q15 <= 0x8000:
         raise ValueError("amplitude-vpk 必须在 0..5V")
-    if not 0 <= ftw <= 0x0020C49C:
-        raise ValueError("FTW 超出 AD9767 允许范围 0x00000000..0x0020C49C")
+    if not 0 <= ftw <= MAX_DAC_FTW:
+        raise ValueError(
+            f"FTW 超出 AD9767 允许范围 0x00000000..0x{MAX_DAC_FTW:08X}")
 
     return struct.pack(
         "<BBIHHB",

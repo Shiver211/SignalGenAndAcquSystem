@@ -28,6 +28,7 @@ class WaveformTest(unittest.TestCase):
         self.assertEqual(format_voltage(-1.089), "-1.089 V")
         self.assertEqual(format_voltage(2.0, peak_to_peak=True), "2.000 V")
         self.assertEqual(format_frequency_hz(10_000), "10.000 kHz")
+        self.assertEqual(format_frequency_hz(5_000_000), "5.000 MHz")
         self.assertEqual(format_frequency_hz(50.0), "50.0 Hz")
         with self.assertRaises(ValueError):
             gain_from_known_vpp(10, 8.0)

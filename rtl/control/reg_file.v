@@ -2,7 +2,8 @@
 
 module reg_file #(
     parameter integer MAX_PAYLOAD_BYTES = 32,
-    parameter [31:0]  MAX_DAC_FTW       = 32'h0020_C49C
+    // 5MHz @ 100MSPS DDS 更新率；ROM 深度不变，正弦每周期约 20 点。
+    parameter [31:0]  MAX_DAC_FTW       = 32'h0CCC_CCCD
 ) (
     input  wire                                 clk,
     input  wire                                 reset,
@@ -565,7 +566,7 @@ module reg_file #(
                                         response_len     <= 8'd32;
                                         response_payload <= {(MAX_PAYLOAD_BYTES * 8){1'b0}};
                                         response_payload[0  * 8 +: 8]  <= 8'd1;
-                                        response_payload[1  * 8 +: 8]  <= 8'd3;
+                                        response_payload[1  * 8 +: 8]  <= 8'd4;
                                         response_payload[2  * 8 +: 8]  <= 8'd0;
                                         response_payload[3  * 8 +: 8]  <= 8'd5;
                                         response_payload[4  * 8 +: 8]  <= 8'd1;

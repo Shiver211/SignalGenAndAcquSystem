@@ -343,6 +343,39 @@ module tb_control_plane_m3;
             $display("[PASS] dual-channel generator commit is atomic");
         end
 
+        // 5MHz 上限：MAX_DAC_FTW 恰好通过，再多 1 个 LSB 必须拒绝且不改活动寄存器。
+        clear_request_payload();
+        request_payload[0  * 8 +: 8]  = 8'd0;
+        request_payload[1  * 8 +: 8]  = 8'd0;
+        request_payload[2  * 8 +: 32] = 32'h0CCC_CCCD;
+        request_payload[6  * 8 +: 16] = 16'h8000;
+        request_payload[8  * 8 +: 16] = 16'h8000;
+        request_payload[10 * 8 +: 8]  = 8'd1;
+        send_request(8'h01, 8'd11, request_payload, 1'b0);
+        expect_response(8'h01, 8'h00);
+        if (ftw_ch1 !== 32'h0CCC_CCCD) begin
+            $display("[FAIL] 5MHz FTW limit rejected: %08x", ftw_ch1);
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] 5MHz FTW limit accepted");
+        end
+
+        clear_request_payload();
+        request_payload[0  * 8 +: 8]  = 8'd0;
+        request_payload[1  * 8 +: 8]  = 8'd0;
+        request_payload[2  * 8 +: 32] = 32'h0CCC_CCCE;
+        request_payload[6  * 8 +: 16] = 16'h8000;
+        request_payload[8  * 8 +: 16] = 16'h8000;
+        request_payload[10 * 8 +: 8]  = 8'd1;
+        send_request(8'h01, 8'd11, request_payload, 1'b0);
+        expect_response(8'h01, 8'h03);
+        if (ftw_ch1 !== 32'h0CCC_CCCD) begin
+            $display("[FAIL] out-of-range FTW changed active register: %08x", ftw_ch1);
+            failures = failures + 1;
+        end else begin
+            $display("[PASS] out-of-range FTW rejected atomically");
+        end
+
         // 两路校准同样先暂存，再由最后一条命令统一提交。
         clear_request_payload();
         request_payload[0 * 8 +: 8]  = 8'd0;
@@ -561,7 +594,8 @@ module tb_control_plane_m3;
         expect_response(8'h07, 8'h00);
         if ((observed_len !== 8'd32) ||
             (observed_payload[0 * 8 +: 8] !== 8'd1) ||
-            (observed_payload[3 * 8 +: 8] !== 8'd5) || // 与现有固件版本 1.3.0.5 一致。
+            (observed_payload[1 * 8 +: 8] !== 8'd4) || // 协议 1.4 起放开 DDS 上限到 5MHz。
+            (observed_payload[3 * 8 +: 8] !== 8'd5) || // 与现有固件版本 1.4.0.5 一致。
             (observed_payload[5 * 8 +: 8] !== 8'h64) ||
             (observed_payload[6 * 8 +: 8] !== 8'h05) ||
             (observed_payload[8 * 8 +: 32] !== 32'd1) ||

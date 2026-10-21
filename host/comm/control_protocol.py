@@ -6,6 +6,8 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 
+from host.config import GENERATOR_MAX_HZ, GENERATOR_MAX_HZ_LEGACY
+
 
 class Command(IntEnum):
     SET_GENERATOR = 0x01
@@ -132,8 +134,8 @@ def generator_payload(
 ) -> bytes:
     if channel not in (1, 2):
         raise ValueError("通道必须为 1 或 2")
-    if not 0 <= frequency_hz <= 50_000:
-        raise ValueError("输出频率必须在 0..50000Hz")
+    if not 0 <= frequency_hz <= GENERATOR_MAX_HZ:
+        raise ValueError(f"输出频率必须在 0..{GENERATOR_MAX_HZ}Hz")
     if not 0 <= amplitude_vpk <= 5:
         raise ValueError("输出幅度必须在 0..5Vpk")
     ftw = round(frequency_hz * (1 << 32) / update_rate_hz)
@@ -237,6 +239,11 @@ def parse_device_status(payload: bytes) -> dict[str, object]:
         "mmcm_locked": bool(flags & 0x40),
         "last_error": payload[6],
         "interleave_supported": (payload[0], payload[1]) >= (1, 1),
+        # 协议 1.4 起 FPGA 的 MAX_DAC_FTW 从 50kHz 放开到 5MHz。
+        "generator_max_hz": (
+            GENERATOR_MAX_HZ if (payload[0], payload[1]) >= (1, 4)
+            else GENERATOR_MAX_HZ_LEGACY
+        ),
         "adc_calibration_active": (payload[0], payload[1]) >= (1, 2) and bool(payload[7] & 8),
         "sampling_mode": payload[7] & 1,
         "sample_ready": bool(payload[7] & 2),

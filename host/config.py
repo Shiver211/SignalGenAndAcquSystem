@@ -15,3 +15,8 @@ MAX_ENVELOPE_POINTS = 2048
 GBE_ENVELOPE_BYTES_PER_SEC = 80_000_000
 # 只限制上位机连续波形的绘制频率，不改变 FPGA 采样和上传配置。
 DISPLAY_MAX_FPS = 60
+
+# 信号源上限由协议版本决定：协议 1.4 起 DDS 钳位放开到 5MHz（100MSPS 更新率
+# 下每周期 20 点）；1.3 及更早的位流仍限制在 50kHz。
+GENERATOR_MAX_HZ = 5_000_000
+GENERATOR_MAX_HZ_LEGACY = 50_000

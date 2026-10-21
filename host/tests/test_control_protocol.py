@@ -42,8 +42,10 @@ class ControlProtocolTest(unittest.TestCase):
         self.assertEqual((channel, wave, amplitude, dc, flags), (0, 0, 0x199A, 0x8000, 0))
         self.assertGreater(ftw, 0)
         self.assertEqual(ftw, round(1000 * (1 << 32) / 100_000_000))
-        maximum = generator_payload(2, Waveform.SINE, 50_000, 1.0)
-        self.assertEqual(struct.unpack_from("<I", maximum, 2)[0], 0x0020C49C)
+        maximum = generator_payload(2, Waveform.SINE, 5_000_000, 1.0)
+        self.assertEqual(struct.unpack_from("<I", maximum, 2)[0], 0x0CCCCCCD)
+        with self.assertRaises(ValueError):
+            generator_payload(1, Waveform.SINE, 5_000_001, 1.0)
         acquisition = acquisition_payload(0, 2048, 16, 0, 20_000, 50, channel_mask=1)
         self.assertEqual(len(acquisition), 14)
         processing = processing_payload(DataMode.ENVELOPE, 16, 1024, 20)
@@ -59,6 +61,17 @@ class ControlProtocolTest(unittest.TestCase):
         self.assertTrue(status["ddr_calibrated"])
         self.assertTrue(status["network_link_up"])
         self.assertEqual(status["config_sequence"], 9)
+
+    def test_generator_limit_follows_protocol_version(self) -> None:
+        def status_for(version: tuple[int, int]) -> dict[str, object]:
+            payload = bytearray(32)
+            payload[0:2] = bytes(version)
+            return parse_device_status(payload)
+
+        self.assertEqual(status_for((1, 4))["generator_max_hz"], 5_000_000)
+        self.assertEqual(status_for((1, 5))["generator_max_hz"], 5_000_000)
+        self.assertEqual(status_for((1, 3))["generator_max_hz"], 50_000)
+        self.assertEqual(status_for((1, 0))["generator_max_hz"], 50_000)
 
 
 if __name__ == "__main__":

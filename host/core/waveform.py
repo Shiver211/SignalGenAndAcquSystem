@@ -68,6 +68,8 @@ def format_voltage(voltage: float, *, peak_to_peak: bool = False) -> str:
 
 def format_frequency_hz(frequency_hz: float) -> str:
     value = float(frequency_hz)
+    if value >= 1_000_000.0:
+        return f"{value / 1_000_000.0:.3f} MHz"
     if value >= 1000.0:
         return f"{value / 1000.0:.3f} kHz"
     return f"{value:.1f} Hz"

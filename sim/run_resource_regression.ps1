@@ -1,5 +1,7 @@
 ﻿param(
     [string[]]$TestBenches = @(
+        'tb_lcd_demo',
+        'tb_lcd_clock',
         'tb_ad9767_parallel',
         'tb_ad9767_signal_gen',
         'tb_envelope_async_fifo_m7',

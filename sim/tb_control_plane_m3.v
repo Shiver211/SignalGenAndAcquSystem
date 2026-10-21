@@ -561,7 +561,7 @@ module tb_control_plane_m3;
         expect_response(8'h07, 8'h00);
         if ((observed_len !== 8'd32) ||
             (observed_payload[0 * 8 +: 8] !== 8'd1) ||
-            (observed_payload[3 * 8 +: 8] !== 8'd4) ||
+            (observed_payload[3 * 8 +: 8] !== 8'd5) || // 与现有固件版本 1.3.0.5 一致。
             (observed_payload[5 * 8 +: 8] !== 8'h64) ||
             (observed_payload[6 * 8 +: 8] !== 8'h05) ||
             (observed_payload[8 * 8 +: 32] !== 32'd1) ||

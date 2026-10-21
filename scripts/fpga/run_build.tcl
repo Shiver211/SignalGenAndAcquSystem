@@ -8,12 +8,17 @@ set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs synth_1]
 set_property INCREMENTAL_CHECKPOINT "" [get_runs synth_1]
 puts "M7_SYNTH_INCREMENTAL_DISABLED"
 
-set m7_rtl_files [concat [glob -nocomplain [file join $project_root rtl network *.v]] [glob -nocomplain [file join $project_root rtl acquire *.v]]]
+set m7_rtl_files [concat [glob -nocomplain [file join $project_root rtl network *.v]] [glob -nocomplain [file join $project_root rtl acquire *.v]] [glob -nocomplain [file join $project_root rtl display *.v]]]
 
 foreach source_file $m7_rtl_files {
     if {[llength [get_files -quiet $source_file]] == 0} {
         add_files -fileset sources_1 -norecurse $source_file
     }
+}
+
+set lcd_constraints [file join $project_root constraints rgblcd.xdc]
+if {[llength [get_files -quiet $lcd_constraints]] == 0} {
+    add_files -fileset constrs_1 -norecurse $lcd_constraints
 }
 
 set eth_ip_xci [file join $project_root ip clk_eth_125m_m7 clk_eth_125m_m7.xci]

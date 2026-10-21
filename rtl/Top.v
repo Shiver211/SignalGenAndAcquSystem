@@ -40,7 +40,17 @@ module Top (
     output wire [3:0] eth_txd_1,
     output wire eth_rst_n,
     output wire eth_mdc,
-    inout  wire eth_mdio
+    inout  wire eth_mdio,
+    output wire [7:0] lcd_r,
+    output wire [7:0] lcd_g,
+    output wire [7:0] lcd_b,
+    output wire lcd_clk,
+    output wire lcd_hsync,
+    output wire lcd_vsync,
+    output wire lcd_de,
+    output wire lcd_reset_n,
+    output wire lcd_bl,
+    output wire lcd_touch_reset_n
 );
 
     wire clk_sample_130m, rst_sample, phase_ready;
@@ -136,6 +146,20 @@ module Top (
         .phase_position   (),
         .adc_read_heartbeat(adc_read_heartbeat)
     );
+
+    wire clk_lcd_pixel, rst_lcd_pixel;
+    lcd_clock u_lcd_clock (
+        .clk_100m(clk_sys_100m), .reset(rst_sys),
+        .clk_pixel(clk_lcd_pixel), .reset_pixel(rst_lcd_pixel)
+    );
+    lcd_demo u_lcd_demo (
+        .clk_pixel(clk_lcd_pixel), .reset(rst_lcd_pixel),
+        .lcd_r(lcd_r), .lcd_g(lcd_g), .lcd_b(lcd_b), .lcd_clk(lcd_clk),
+        .lcd_hsync(lcd_hsync), .lcd_vsync(lcd_vsync), .lcd_de(lcd_de),
+        .lcd_reset_n(lcd_reset_n), .lcd_bl(lcd_bl)
+    );
+    // 本阶段不启用触摸，将 GT9147 保持在复位状态。
+    assign lcd_touch_reset_n = 1'b0;
 
     ad9226_clock_forward u_ad9226_clock_forward (
         .interleave_enable(adc_control_config[169]), .interleave_active(interleave_clock),

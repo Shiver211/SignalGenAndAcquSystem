@@ -104,6 +104,11 @@ class PlotWidget(QtWidgets.QWidget):
         self._adc_offset = {1: 0.0, 2: 0.0}
         self._smoothing_start_hz = DEFAULT_SMOOTHING_START_HZ.copy()
         self._last_frame: CompletedFrame | None = None
+        # 只保留当前帧；缓存原算法结果，分度/位置重绘不重复解码和分析。
+        self._decoded_frame: dict[str, np.ndarray] | None = None
+        self._raw_display_cache: dict[int, tuple] = {}
+        self._envelope_display_cache: dict[int, tuple] = {}
+        self._fft_cache: dict[int, tuple] = {}
         self._trigger_alignment: tuple[int, float, bool] | None = None
         self._frame_trigger_alignment: tuple[int, float, bool] | None = None
         self._has_trigger_alignment = False
@@ -189,6 +194,7 @@ class PlotWidget(QtWidgets.QWidget):
         channel: int,
         gain: float = 1.0,
         offset_v: float = 0.0,
+        *, redraw: bool = True,
     ) -> None:
         channel = self._validate_channel(channel)
         gain_value = float(gain)
@@ -197,9 +203,12 @@ class PlotWidget(QtWidgets.QWidget):
             raise ValueError("ADC 校准增益必须为正数")
         if not np.isfinite(offset_value):
             raise ValueError("ADC 校准偏移必须为有限数")
+        if (self._adc_gain[channel], self._adc_offset[channel]) == (gain_value, offset_value):
+            return
         self._adc_gain[channel] = gain_value
         self._adc_offset[channel] = offset_value
-        self._redraw_last_frame()
+        if redraw:
+            self._redraw_last_frame()
 
     def _codes_to_volts(self, codes: np.ndarray, channel: int) -> np.ndarray:
         gain = self._adc_gain[channel]
@@ -310,6 +319,11 @@ class PlotWidget(QtWidgets.QWidget):
         可识别的方波自动整形；连续波形适度平滑，包络保留 Min/Max 范围。
         方波先由原始样点定位边沿，再保留竖线端点抽点；其余波形保留桶内极值。
         """
+        if frame is not self._last_frame:
+            self._decoded_frame = None
+            self._raw_display_cache.clear()
+            self._envelope_display_cache.clear()
+            self._fft_cache.clear()
         if not align_trigger:
             self._frame_trigger_alignment = None
         elif frame is not self._last_frame:
@@ -319,15 +333,14 @@ class PlotWidget(QtWidgets.QWidget):
         sample_format = frame.header.sample_format
         if self._fft:
             if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
-                values = decode_envelope64(frame.payload, frame.header.channel_mask)
+                values = self.decoded_frame(frame)
                 min_a = values["min_a"].astype(np.float64)
                 max_a = values["max_a"].astype(np.float64)
                 min_b = values["min_b"].astype(np.float64)
                 max_b = values["max_b"].astype(np.float64)
                 center_a = (min_a + max_a) / 2.0
                 center_b = (min_b + max_b) / 2.0
-                a = self._codes_to_volts(center_a, 1)
-                b = self._codes_to_volts(center_b, 2)
+                a, b = center_a, center_b
                 if len(a) > 0 and frame.header.sample_rate_hz > 0:
                     self._display_fft(a, b, frame.header.sample_rate_hz)
                     return
@@ -335,12 +348,8 @@ class PlotWidget(QtWidgets.QWidget):
                 return
             if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16,
                                  SampleFormat.DECIMATED32):
-                decode_mask = (frame.header.channel_mask
-                               if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
-                               else 0x03)
-                decoded = decode_raw32(frame.payload, decode_mask)
-                a = self._codes_to_volts(decoded["a"], 1)
-                b = self._codes_to_volts(decoded["b"], 2)
+                decoded = self.decoded_frame(frame)
+                a, b = decoded["a"], decoded["b"]
                 if len(a) > 0 and frame.header.sample_rate_hz > 0:
                     self._display_fft(a, b, frame.header.sample_rate_hz)
                     return
@@ -357,12 +366,8 @@ class PlotWidget(QtWidgets.QWidget):
             self._clear_waveforms()
             return
 
-        decode_mask = (frame.header.channel_mask
-                       if sample_format in (SampleFormat.RAW32, SampleFormat.RAW16)
-                       else 0x03)
-        decoded = decode_raw32(frame.payload, decode_mask)
-        a = self._codes_to_volts(decoded["a"], 1)
-        b = self._codes_to_volts(decoded["b"], 2)
+        decoded = self.decoded_frame(frame)
+        a, b = decoded["a"], decoded["b"]
         if len(a) == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
             return
@@ -384,18 +389,25 @@ class PlotWidget(QtWidgets.QWidget):
         self._clear_envelope()
         self._envelope_active = False
         for channel, curve, values in ((1, self.curve_a, a), (2, self.curve_b, b)):
-            # 清理前的过渡样点含有亚采样时间信息，只整形一次，避免重新定时。
-            ideal = idealize_square_display(x, values)
-            display_x, display_y = (ideal if ideal is not None else
-                                    (x, self._smooth_display(values, sample_rate, channel)))
-            display_x, display_y, connect = self._reduce_curve_for_display(
-                display_x, display_y, max_points, square=ideal is not None,
-            )
+            key = (self._seconds_per_div, max_points, self._adc_gain[channel],
+                   self._adc_offset[channel], self._smoothing_start_hz[channel])
+            cached = self._raw_display_cache.get(channel)
+            if cached is None or cached[0] != key:
+                volts = self._codes_to_volts(values, channel)
+                # 清理前的过渡样点含有亚采样时间信息，只整形一次，避免重新定时。
+                ideal = idealize_square_display(x, volts)
+                display_x, display_y = (ideal if ideal is not None else
+                                        (x, self._smooth_display(volts, sample_rate, channel)))
+                result = self._reduce_curve_for_display(
+                    display_x, display_y, max_points, square=ideal is not None,
+                )
+                self._raw_display_cache[channel] = (key, result)
+            display_x, display_y, connect = self._raw_display_cache[channel][1]
             curve.setData(display_x, self._to_divisions(display_y, channel), connect=connect)
         self._apply_visibility()
 
     def _display_envelope(self, frame: CompletedFrame) -> None:
-        values = decode_envelope64(frame.payload, frame.header.channel_mask)
+        values = self.decoded_frame(frame)
         count = len(values["min_a"])
         if count == 0 or frame.header.sample_rate_hz <= 0:
             self._clear_waveforms()
@@ -424,16 +436,22 @@ class PlotWidget(QtWidgets.QWidget):
             (1, self.curve_a, self.min_a, self.max_a, min_a, max_a),
             (2, self.curve_b, self.min_b, self.max_b, min_b, max_b),
         ):
-            ideal = idealize_square_display(x, lo, hi)
+            key = (self._seconds_per_div, self._frame_trigger_alignment,
+                   self._smoothing_start_hz[channel])
+            cached = self._envelope_display_cache.get(channel)
+            if cached is None or cached[0] != key:
+                ideal = idealize_square_display(x, lo, hi)
+                center = (self._smooth_display((lo + hi) / 2.0, sample_rate, channel)
+                          if ideal is None else None)
+                self._envelope_display_cache[channel] = (key, ideal, center)
+            _, ideal, center = self._envelope_display_cache[channel]
             if ideal is not None:
                 display_x, codes = ideal
                 curve.setData(display_x, self._to_divisions(self._codes_to_volts(codes, channel), channel),
                               connect="all")
-                minimum.clear()
-                maximum.clear()
+                self._set_envelope_bounds(channel)
             else:
                 # 仅平滑中心线；可见的 Min/Max 仍来自 FPGA 的原始包络。
-                center = self._smooth_display((lo + hi) / 2.0, sample_rate, channel)
                 curve.setData(
                     x, self._to_divisions(self._codes_to_volts(center, channel), channel),
                     connect="all",
@@ -449,20 +467,14 @@ class PlotWidget(QtWidgets.QWidget):
                 if np.any(visible_band):
                     display_lo = np.where(visible_band, lo, center)
                     display_hi = np.where(visible_band, hi, center)
-                    minimum.setData(
-                        x, self._to_divisions(
-                            self._codes_to_volts(display_lo, channel), channel,
-                        ),
-                    )
-                    maximum.setData(
-                        x, self._to_divisions(
-                            self._codes_to_volts(display_hi, channel), channel,
-                        ),
+                    self._set_envelope_bounds(
+                        channel, x,
+                        self._to_divisions(self._codes_to_volts(display_lo, channel), channel),
+                        self._to_divisions(self._codes_to_volts(display_hi, channel), channel),
                     )
                     self._envelope_channels.add(channel)
                 else:
-                    minimum.clear()
-                    maximum.clear()
+                    self._set_envelope_bounds(channel)
         self._apply_visibility()
 
     def _envelope_trigger_offset(
@@ -498,8 +510,16 @@ class PlotWidget(QtWidgets.QWidget):
         return getattr(self, "_fft_span_hz", 0.0)
 
     def _display_fft(self, a: np.ndarray, b: np.ndarray, sample_rate_hz: int) -> None:
-        fa, ma = fft_spectrum(a, sample_rate_hz)
-        fb, mb = fft_spectrum(b, sample_rate_hz)
+        spectra = []
+        for channel, samples in ((1, a), (2, b)):
+            key = (sample_rate_hz, self._adc_gain[channel], self._adc_offset[channel])
+            cached = self._fft_cache.get(channel)
+            if cached is None or cached[0] != key:
+                self._fft_cache[channel] = (
+                    key, fft_spectrum(self._codes_to_volts(samples, channel), sample_rate_hz),
+                )
+            spectra.append(self._fft_cache[channel][1])
+        (fa, ma), (fb, mb) = spectra
         self._has_trigger_alignment = False
         self._clear_envelope()
         self.curve_a.setData(fa, ma, connect="all")
@@ -524,6 +544,43 @@ class PlotWidget(QtWidgets.QWidget):
         self._apply_visibility()
 
     # ---- 内部绘图辅助 --------------------------------------------------
+
+    def decoded_frame(self, frame: CompletedFrame) -> dict[str, np.ndarray]:
+        """绘制和测量共用当前帧的只读解码结果，不修改原始 payload。"""
+        if frame is self._last_frame and self._decoded_frame is not None:
+            return self._decoded_frame
+        sample_format = frame.header.sample_format
+        if sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
+            decoded = decode_envelope64(frame.payload, frame.header.channel_mask)
+        else:
+            mask = 0x03 if sample_format == SampleFormat.DECIMATED32 else frame.header.channel_mask
+            decoded = decode_raw32(frame.payload, mask)
+        if frame is self._last_frame:
+            self._decoded_frame = decoded
+        return decoded
+
+    def _set_envelope_bounds(
+        self, channel: int, x: np.ndarray | None = None,
+        lo: np.ndarray | None = None, hi: np.ndarray | None = None,
+    ) -> None:
+        """两条边界一起提交后再重建填充，避免先混用上一帧的一条边界。"""
+        minimum, maximum, fill = ((self.min_a, self.max_a, self.fill_a) if channel == 1
+                                  else (self.min_b, self.max_b, self.fill_b))
+        if x is None:
+            if minimum.getData()[0] is not None:
+                minimum.clear()
+            if maximum.getData()[0] is not None:
+                maximum.clear()
+            return
+        old_min = minimum.blockSignals(True)
+        old_max = maximum.blockSignals(True)
+        try:
+            minimum.setData(x, lo)
+            maximum.setData(x, hi)
+        finally:
+            minimum.blockSignals(old_min)
+            maximum.blockSignals(old_max)
+        fill.updatePath()
 
     def _configure_grid(self) -> None:
         self.grid_item.setTickSpacing(
@@ -594,6 +651,8 @@ class PlotWidget(QtWidgets.QWidget):
         if self._last_frame is not None:
             self.display_frame(self._last_frame)
 
+    redraw_last_frame = _redraw_last_frame
+
     def _clear_waveforms(self) -> None:
         for curve in (self.curve_a, self.curve_b, self.min_a, self.max_a,
                       self.min_b, self.max_b):
@@ -601,6 +660,10 @@ class PlotWidget(QtWidgets.QWidget):
         self.fill_a.setVisible(False)
         self.fill_b.setVisible(False)
         self._last_frame = None
+        self._decoded_frame = None
+        self._raw_display_cache.clear()
+        self._envelope_display_cache.clear()
+        self._fft_cache.clear()
         self._frame_trigger_alignment = None
         self._envelope_active = False
         self._envelope_channels = set()
@@ -610,8 +673,8 @@ class PlotWidget(QtWidgets.QWidget):
     def _clear_envelope(self) -> None:
         self._envelope_channels = set()
         self._envelope_active = False
-        for curve in (self.min_a, self.max_a, self.min_b, self.max_b):
-            curve.clear()
+        for channel in (1, 2):
+            self._set_envelope_bounds(channel)
         self.fill_a.setVisible(False)
         self.fill_b.setVisible(False)
 

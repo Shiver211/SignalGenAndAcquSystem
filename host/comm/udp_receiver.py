@@ -176,6 +176,9 @@ class UdpReceiver(QtCore.QObject):
         self._bind = "0.0.0.0"
         self._port = UDP_PORT
         self.reassembler = FrameReassembler()
+        self._display_lock = threading.Lock()
+        self._latest_envelope: CompletedFrame | None = None
+        self._raw_progress_percent: tuple[int, int, int] | None = None
 
     @property
     def running(self) -> bool:
@@ -186,6 +189,7 @@ class UdpReceiver(QtCore.QObject):
         self._bind, self._port = bind, port
         self._stop.clear()
         self._flush.clear()
+        self._raw_progress_percent = None
         self.reassembler = FrameReassembler()
         self._thread = threading.Thread(target=self._worker, name="udp-receiver", daemon=True)
         self._thread.start()
@@ -195,12 +199,35 @@ class UdpReceiver(QtCore.QObject):
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.5)
         self._thread = None
+        self.discard_display_frame()
 
     def discard_pending(self) -> None:
         """丢弃时基切换前已经排队的 UDP 数据。"""
-        self._flush.set()
-        if not self.running:
+        if self.running:
+            self._flush.set()
+        else:
             self.reassembler = FrameReassembler()
+        self.discard_display_frame()
+        self._raw_progress_percent = None
+
+    def discard_display_frame(self) -> None:
+        with self._display_lock:
+            self._latest_envelope = None
+
+    def take_display_frame(self) -> CompletedFrame | None:
+        """界面按帧率取走最新包络，不向 Qt 事件队列逐帧发送波形。"""
+        with self._display_lock:
+            frame, self._latest_envelope = self._latest_envelope, None
+        return frame
+
+    def _publish_frame(self, frame: CompletedFrame) -> None:
+        if frame.header.data_type == DataType.ENVELOPE_FRAME:
+            with self._display_lock:
+                if not self._flush.is_set():
+                    self._latest_envelope = frame
+        else:
+            # RAW 完整记录和测量报文仍逐帧交付，不参与显示丢帧。
+            self.frame_received.emit(frame)
 
     def _emit_raw_progress(self) -> None:
         latest: _FrameState | None = None
@@ -210,7 +237,11 @@ class UdpReceiver(QtCore.QObject):
             ):
                 latest = state
         if latest is not None and latest.total_bytes:
-            self.raw_progress.emit(latest.received_bytes, latest.total_bytes)
+            percent = latest.received_bytes * 100 // latest.total_bytes
+            key = (latest.header.frame_id, latest.total_bytes, percent)
+            if key != self._raw_progress_percent:
+                self._raw_progress_percent = key
+                self.raw_progress.emit(latest.received_bytes, latest.total_bytes)
 
     def _worker(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -236,7 +267,7 @@ class UdpReceiver(QtCore.QObject):
                     frame = self.reassembler.ingest(datagram)
                     self._emit_raw_progress()
                     if frame is not None:
-                        self.frame_received.emit(frame)
+                        self._publish_frame(frame)
                 except socket.timeout:
                     pass
                 except (OSError, DatagramError) as exc:

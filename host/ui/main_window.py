@@ -19,13 +19,13 @@ from host.comm.control_protocol import (
 )
 from host.comm.data_protocol import (
     CompletedFrame, Measurement, SampleFormat, decode_measurement_v1,
-    decode_envelope64, decode_raw32,
 )
 from host.comm.serial_link import SerialLink
 from host.comm.udp_receiver import UdpReceiver
 from host.config import (
     ADC_SAMPLE_RATE_HZ, INTERLEAVE_SAMPLE_RATE_HZ, GBE_ENVELOPE_BYTES_PER_SEC, MAX_ENVELOPE_POINTS,
     PC_IP, UART_BAUD, UDP_PORT,
+    DISPLAY_MAX_FPS,
 )
 from host.core.dac_calibration import (
     TEST_FRACTION, full_scale_vpp_from_test, nominal_vpk_for_target,
@@ -39,7 +39,7 @@ from host.db.sqlite_store import SqliteStore
 from host.ui.plot_widget import ChannelDisplayMode, DEFAULT_SMOOTHING_START_HZ, PlotWidget
 from host.ui.icons import ICON_ON_ACCENT, icon
 from host.ui.segmented import SegmentedControl
-from host.ui.theme import CH1_COLOR, CH2_COLOR, PLOT_BACKGROUND, STYLE_SHEET, set_led
+from host.ui.theme import CH1_COLOR, CH2_COLOR, PLOT_BACKGROUND, STYLE_SHEET, set_label_text, set_led
 
 
 class AcquisitionMode(IntEnum):
@@ -117,6 +117,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_signals()
         self._refresh_ports()
         self._refresh_records()
+        self.display_timer = QtCore.QTimer(self)
+        self.display_timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self.display_timer.timeout.connect(self._refresh_display)
+        self.display_timer.setInterval(ceil(1000 / DISPLAY_MAX_FPS))
         self.status_timer = QtCore.QTimer(self)
         self.status_timer.timeout.connect(self._query_status)
         self.status_timer.start(1000)
@@ -133,15 +137,25 @@ class MainWindow(QtWidgets.QMainWindow):
     @_continuous_running.setter
     def _continuous_running(self, running: bool) -> None:
         self._running = bool(running)
+        if not self._running:
+            self.udp_receiver.discard_display_frame()
+        if hasattr(self, "display_timer"):
+            if self._running:
+                self.display_timer.start()
+            else:
+                self.display_timer.stop()
         if hasattr(self, "run_button"):
             self._update_run_button()
 
     def _update_run_button(self) -> None:
         running = self._continuous_running
-        self.run_button.setText("停止" if running else "运行")
+        text, kind = ("停止", "stop") if running else ("运行", "run")
+        if self.run_button.text() == text and self.run_button.property("kind") == kind:
+            return
+        self.run_button.setText(text)
         self.run_button.setIcon(icon("stop" if running else "play", ICON_ON_ACCENT))
         self.run_button.setToolTip("停止连续采集" if running else "开始连续采集")
-        self._styled(self.run_button, kind="stop" if running else "run")
+        self._styled(self.run_button, kind=kind)
         self.run_button.style().unpolish(self.run_button)
         self.run_button.style().polish(self.run_button)
 
@@ -653,7 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_status(self, key: str, text: str) -> None:
         label = self.status_labels[key]
-        label.setText(text)
+        set_label_text(label, text)
         state = "ok" if text in STATUS_OK else "bad" if text in STATUS_BAD else None
         set_led(label, state)
         set_led(self._status_dots[key], state)
@@ -743,10 +757,10 @@ class MainWindow(QtWidgets.QMainWindow):
             for channel, badge in ((1, self.ch1_badge), (2, self.ch2_badge)):
                 active = mode == ChannelDisplayMode.BOTH or int(mode) == channel
                 v_text = format_voltage(volts_div) if volts_div > 0 else "—"
-                badge.setText(f"CH{channel} {v_text}/div" if active else f"CH{channel}  OFF")
+                set_label_text(badge, f"CH{channel} {v_text}/div" if active else f"CH{channel}  OFF")
                 badge.setEnabled(active)
-            self.timebase_badge.setText(f"{format_frequency_hz(freq_div)}/div" if freq_div > 0 else "FFT")
-            self.trigger_badge.setText(f"SPAN {format_frequency_hz(span)}" if span > 0 else "FFT 频域")
+            set_label_text(self.timebase_badge, f"{format_frequency_hz(freq_div)}/div" if freq_div > 0 else "FFT")
+            set_label_text(self.trigger_badge, f"SPAN {format_frequency_hz(span)}" if span > 0 else "FFT 频域")
             return
 
         for channel, badge, combo, position in (
@@ -754,12 +768,12 @@ class MainWindow(QtWidgets.QMainWindow):
             (2, self.ch2_badge, self.ch2_vdiv_combo, self.ch2_position_spin),
         ):
             active = mode == ChannelDisplayMode.BOTH or int(mode) == channel
-            badge.setText(f"CH{channel} {combo.currentText().replace(' ', '')} {position.value():+.2f}"
+            set_label_text(badge, f"CH{channel} {combo.currentText().replace(' ', '')} {position.value():+.2f}"
                           if active else f"CH{channel}  OFF")
             badge.setEnabled(active)
-        self.timebase_badge.setText(self.timebase_combo.currentText().replace(" ", ""))
+        set_label_text(self.timebase_badge, self.timebase_combo.currentText().replace(" ", ""))
         edge = "↑" if self.trigger_edge.currentIndex() == 0 else "↓"
-        self.trigger_badge.setText(
+        set_label_text(self.trigger_badge,
             f"CH{self.trigger_source.currentIndex() + 1} {edge} {self.threshold_spin.value()}")
 
     def _make_cal_row(self, channel: int) -> QtWidgets.QHBoxLayout:
@@ -1071,6 +1085,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_acquisition(self) -> None:
         if self._mode_switching:
             return
+        self.udp_receiver.discard_display_frame()
         self.plot_widget.set_trigger_alignment(None)
         self._pending_trigger_alignment = None
         self._clear_continuous_measurement()
@@ -1216,7 +1231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._manual_busy or total <= 0:
             return
         percent = min(100, int(received * 100 / total))
-        self.capture_progress.setText(f"上传中 {percent}%")
+        set_label_text(self.capture_progress, f"上传中 {percent}%")
 
     def _request_retransmit(self, frame_id: int, offset: int, length: int) -> None:
         if self._uart_connected:
@@ -1305,6 +1320,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._set_status("adc", "正常" if status["adc_clock_alive"] else "异常")
             self._set_status("mmcm", "锁定" if status["mmcm_locked"] else "未锁定")
 
+    def _refresh_display(self) -> None:
+        frame = self.udp_receiver.take_display_frame()
+        if frame is not None and self._continuous_running:
+            self._on_frame(frame)
+
     def _on_frame(self, frame: CompletedFrame, persist_measurement: bool = True) -> None:
         if persist_measurement and (self._mode_switching or bool(frame.header.flags & 0x0100) != bool(self._sampling_mode)):
             return
@@ -1360,7 +1380,7 @@ class MainWindow(QtWidgets.QMainWindow):
             active = bool(mask & (1 << (channel - 1)))
             states.append("—" if active else "未启用")
             for label in self.measurement_labels[(channel - 1) * 4:channel * 4]:
-                label.setText(states[-1])
+                set_label_text(label, states[-1])
         self._set_status("otr", "/".join(states))
 
     def _update_square_amplitude(self, frame: CompletedFrame) -> None:
@@ -1369,7 +1389,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._square_amplitude_mask = frame.header.channel_mask
         self._square_amplitude_time = monotonic()
         if frame.header.sample_format in (SampleFormat.ENVELOPE64, SampleFormat.ENVELOPE32):
-            decoded = decode_envelope64(frame.payload, frame.header.channel_mask)
+            decoded = self.plot_widget.decoded_frame(frame)
             for channel, name in ((1, "a"), (2, "b")):
                 if not frame.header.channel_mask & channel:
                     continue
@@ -1426,7 +1446,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_scope_badges()
 
     def _measure_raw_frame(self, frame: CompletedFrame) -> None:
-        decoded = decode_raw32(frame.payload, frame.header.channel_mask)
+        decoded = self.plot_widget.decoded_frame(frame)
         sample_rate = float(frame.header.sample_rate_hz)
         mask = frame.header.channel_mask
 
@@ -1508,7 +1528,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_widget.set_adc_calibration(
                 channel, self._adc_gain[channel],
                 self._adc_offset[channel] + fixed_dc_offset_v(channel, self._adc_gain[channel]),
+                redraw=False,
             )
+        self.plot_widget.redraw_last_frame()
 
     def _render_measurement(self, measurement: Measurement, channel_mask: int) -> None:
         channels = (
@@ -1521,16 +1543,16 @@ class MainWindow(QtWidgets.QMainWindow):
             labels = self.measurement_labels[(channel - 1) * 4:channel * 4]
             if not (channel_mask & (1 << (channel - 1))):
                 for label in labels:
-                    label.setText("未启用")
+                    set_label_text(label, "未启用")
                 continue
             gain = self._adc_gain[channel]
             offset = self._adc_offset[channel] + fixed_dc_offset_v(channel, gain)
-            labels[0].setText(format_voltage(code_to_voltage(min_code, gain=gain, offset_v=offset)))
-            labels[1].setText(format_voltage(code_to_voltage(max_code, gain=gain, offset_v=offset)))
-            labels[2].setText(format_voltage(
+            set_label_text(labels[0], format_voltage(code_to_voltage(min_code, gain=gain, offset_v=offset)))
+            set_label_text(labels[1], format_voltage(code_to_voltage(max_code, gain=gain, offset_v=offset)))
+            set_label_text(labels[2], format_voltage(
                 vpp_from_code_span(vpp_code, gain=gain), peak_to_peak=True,
             ))
-            labels[3].setText(format_frequency_hz(frequency) if valid else "无效")
+            set_label_text(labels[3], format_frequency_hz(frequency) if valid else "无效")
         otr_a = (str(measurement.otr_count_a) if channel_mask & 0x01 else "未启用")
         otr_b = (str(measurement.otr_count_b) if channel_mask & 0x02 else "未启用")
         self._set_status("otr", f"{otr_a}/{otr_b}")
@@ -1557,8 +1579,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_adc_calibration()
         self._apply_adc_calibration()
         self._render_measurement(self._displayed_measurement or measurement, mask)
-        if self.current_frame is not None:
-            self.plot_widget.display_frame(self.current_frame)
         self.statusBar().showMessage(
             f"幅度已校准：CH{channel}×{self._adc_gain[channel]:.4f}", 5000,
         )
@@ -1572,8 +1592,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_adc_calibration()
         if self._displayed_measurement is not None:
             self._render_measurement(self._displayed_measurement, self._last_measurement_mask)
-        if self.current_frame is not None:
-            self.plot_widget.display_frame(self.current_frame)
         self.statusBar().showMessage(f"CH{channel} 已恢复标称 ±5V 换算", 3000)
 
     def _envelope_display_points(
@@ -1622,6 +1640,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seconds = self.timebase_combo.currentData()
         if seconds is None:
             return
+        self.udp_receiver.discard_display_frame()
         self.plot_widget.set_timebase(float(seconds))
         if self.current_frame is not None:
             self.plot_widget.display_frame(self.current_frame)
@@ -1638,6 +1657,7 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self.channel_mode_combo.currentData()
         if mode is None:
             return
+        self.udp_receiver.discard_display_frame()
         self.plot_widget.set_channel_mode(mode)
         self._update_channel_controls()
         if self._manual_busy or self._acquisition_mode == AcquisitionMode.MANUAL:
@@ -1690,8 +1710,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_analysis(self, index: int) -> None:
         self.plot_widget.set_fft_enabled(index == 1)
-        if self.current_frame is not None:
-            self.plot_widget.display_frame(self.current_frame)
         self._update_scope_badges()
 
     def _save_current(self) -> None:
@@ -1783,6 +1801,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mode_retry.stop()
         self._mode_switching = False
         self.status_timer.stop()
+        self.display_timer.stop()
         self.serial_link.disconnect_port()
         self.udp_receiver.stop()
         self.store.close()

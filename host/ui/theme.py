@@ -142,8 +142,17 @@ QHeaderView::section {{ background: {_CARD}; border: none; padding: 6px; color: 
 """
 
 
+def set_label_text(label, text: str) -> None:
+    """内容相同的读数不重复触发 QLabel 更新和布局。"""
+    if label.text() != text:
+        label.setText(text)
+
+
 def set_led(label, state: str | None) -> None:
     """设置状态灯颜色：``ok``/``bad``/None，并刷新样式。"""
-    label.setProperty("state", state or "")
+    value = state or ""
+    if label.property("state") == value:
+        return
+    label.setProperty("state", value)
     label.style().unpolish(label)
     label.style().polish(label)

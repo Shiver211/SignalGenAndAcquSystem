@@ -64,6 +64,17 @@ TIME_PER_DIV = (
 DAC_GAIN_MODES = ("low", "high")
 STATUS_OK = {"已连接", "已校准", "锁定", "正常", "就绪", "空闲", "ARM"}
 STATUS_BAD = {"断开", "未校准", "未锁定", "异常", "溢出", "未就绪"}
+PANEL_MARGINS = (16, 14, 16, 12)
+PANEL_SPACING = 10
+PANEL_TOOLBAR_HEIGHT = 44
+
+
+class _PanelTabBar(QtWidgets.QTabBar):
+    def sizeHint(self) -> QtCore.QSize:
+        # QTabWidget 按 sizeHint 定位内容区，两侧工具栏必须共用此高度。
+        size = super().sizeHint()
+        size.setHeight(PANEL_TOOLBAR_HEIGHT)
+        return size
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -256,17 +267,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings_button.clicked.connect(self._show_settings)
         row.addWidget(self.settings_button)
         row.addSpacing(4)
-        titles = QtWidgets.QVBoxLayout()
-        titles.setSpacing(0)
         title = QtWidgets.QLabel("Signal Studio")
         title.setObjectName("appTitle")
-        subtitle = QtWidgets.QLabel("FPGA 信号发生与采集系统")
-        subtitle.setObjectName("appSubtitle")
-        titles.addStretch(1)
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        titles.addStretch(1)
-        row.addLayout(titles)
+        row.addWidget(title)
         row.addStretch(1)
         row.addWidget(self.capture_progress)
         row.addWidget(self.acquisition_mode_segment)
@@ -290,9 +293,12 @@ class MainWindow(QtWidgets.QMainWindow):
         sidebar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         sidebar.setFixedWidth(520)
         outer = QtWidgets.QVBoxLayout(sidebar)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(*PANEL_MARGINS)
         tabs = QtWidgets.QTabWidget()
+        tabs.setTabBar(_PanelTabBar(tabs))
         tabs.setDocumentMode(True)
+        tabs.tabBar().setObjectName("controlTabBar")
+        tabs.tabBar().setDrawBase(False)
         # 示波器页放第一位；信号源、连接和记录分别独立，避免长滚动。
         pages = (
             ("示波器", "scope", (self._acquisition_group,)),
@@ -304,7 +310,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for title, icon_name, builders in pages:
             page = QtWidgets.QWidget()
             layout = QtWidgets.QVBoxLayout(page)
-            layout.setContentsMargins(14, 6, 10, 14)
+            layout.setContentsMargins(0, PANEL_SPACING, 0, 0)
             layout.setSpacing(12)
             for build in builders:
                 layout.addWidget(build())
@@ -679,12 +685,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_display_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
+        panel.setObjectName("displayPanel")
+        panel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         layout = QtWidgets.QVBoxLayout(panel)
-        layout.setContentsMargins(16, 14, 16, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(*PANEL_MARGINS)
+        layout.setSpacing(PANEL_SPACING)
         # 单行顶栏：显示模式 + 状态徽章 + 备注与保存（方案 B）
         self.analysis_combo = QtWidgets.QComboBox(); self.analysis_combo.addItems(["时域", "FFT"])
-        info = QtWidgets.QHBoxLayout()
+        toolbar = QtWidgets.QWidget()
+        toolbar.setObjectName("displayToolbar")
+        toolbar.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        toolbar.setFixedHeight(PANEL_TOOLBAR_HEIGHT)
+        info = QtWidgets.QHBoxLayout(toolbar)
+        info.setContentsMargins(0, 0, 0, 0)
         info.setSpacing(8)
         info.addWidget(QtWidgets.QLabel("显示"))
         info.addWidget(self.analysis_combo)
@@ -709,7 +722,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_button.setCursor(QtCore.Qt.PointingHandCursor)
         info.addWidget(self.note_edit)
         info.addWidget(self.save_button)
-        layout.addLayout(info)
+        layout.addWidget(toolbar)
         self.plot_widget = PlotWidget()
         self.plot_widget.set_timebase(float(self.timebase_combo.currentData()))
         self.plot_widget.set_volts_per_div(1, float(self.ch1_vdiv_combo.currentData()))

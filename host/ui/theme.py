@@ -30,15 +30,16 @@ QWidget {{
 QToolTip {{ background: #1f2733; color: {_TEXT}; border: 1px solid #2f3a4a; padding: 4px 8px; border-radius: 6px; }}
 
 /* ---- 框架区域 ---- */
-QWidget#header {{ background: {_SURFACE}; border-bottom: 1px solid {_BORDER}; }}
+QWidget#header {{ background: {_SURFACE}; border: none; border-bottom: 1px solid {_BORDER}; }}
 QWidget#header QLabel {{ background: transparent; }}
 QToolButton#settingsButton {{ background: transparent; border: 1px solid transparent; border-radius: 10px; }}
 QToolButton#settingsButton:hover {{ background: #1c2430; border-color: #2a3444; }}
 QToolButton#settingsButton:pressed {{ background: #222b3a; }}
 QLabel#appTitle {{ font-size: 13pt; font-weight: 700; color: #f5f7fa; }}
-QLabel#appSubtitle {{ color: {_MUTED}; font-size: 9pt; }}
 QWidget#sidebar {{ background: {_SURFACE}; border-right: 1px solid {_BORDER}; }}
-QWidget#sidebar QScrollArea, QWidget#sidebar QScrollArea > QWidget > QWidget {{ background: {_SURFACE}; }}
+/* .QWidget 只匹配普通容器，输入框、按钮和卡片保留各自底色。 */
+QWidget#sidebar .QWidget, QWidget#sidebar QScrollArea {{ background: {_SURFACE}; }}
+QWidget#displayPanel, QWidget#displayToolbar {{ background: {_SURFACE}; }}
 QStatusBar {{ background: {_SURFACE}; border-top: 1px solid {_BORDER}; color: {_MUTED}; min-height: 30px; }}
 QStatusBar::item {{ border: none; }}
 QStatusBar QWidget {{ background: transparent; }}
@@ -53,6 +54,8 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ background: #222b3a; color: #ffffff; }}
 QTabBar::tab:hover:!selected {{ color: {_TEXT}; background: #1a212c; }}
+QTabBar#controlTabBar::tab {{ margin: 0 2px; }}
+QTabBar#controlTabBar::tab:first {{ margin-left: 0; }}
 
 /* ---- 卡片（QGroupBox）：标题在卡片内部，无分割线 ---- */
 QGroupBox {{
